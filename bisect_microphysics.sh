@@ -123,7 +123,7 @@ build_project() {
         -DAMReX_SPACEDIM=1
     
     # Build with ninja
-    ninja -j6
+    ninja -j6 test_hydro_contact
     
     cd ..
     print_success "Build completed"
@@ -205,6 +205,9 @@ mark_good() {
     git bisect good
     cd ../..
     
+    # Update submodule to the next commit identified by bisect
+    git submodule update --recursive
+    
     check_bisect_status
 }
 
@@ -214,6 +217,9 @@ mark_bad() {
     cd extern/Microphysics
     git bisect bad
     cd ../..
+    
+    # Update submodule to the next commit identified by bisect
+    git submodule update --recursive
     
     check_bisect_status
 }
