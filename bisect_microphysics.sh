@@ -183,8 +183,9 @@ test_commit() {
     print_status "Current Microphysics commit: $current_commit"
     cd ../..
     
-    # Update submodules to current commit
-    git submodule update --recursive
+    # Don't use git submodule update during bisect as it would reset our bisect state
+    # Just update other submodules if needed
+    git submodule update --init extern/amrex extern/yaml-cpp extern/fmt 2>/dev/null || true
     
     # Build and test
     if build_project && run_test; then
@@ -202,26 +203,58 @@ test_commit() {
 mark_good() {
     print_status "Marking current commit as good..."
     cd extern/Microphysics
-    git bisect good
+    
+    # Capture the output to check if bisect is complete
+    local bisect_output=$(git bisect good 2>&1)
+    echo "$bisect_output"
+    
     cd ../..
     
-    # Update submodule to the next commit identified by bisect
-    git submodule update --recursive
-    
-    check_bisect_status
+    # Check if bisect found the first bad commit
+    if echo "$bisect_output" | grep -q "is the first bad commit"; then
+        print_success "Bisect complete! Found the first bad commit:"
+        echo "$bisect_output" | grep -A10 "is the first bad commit"
+        print_status "You can now run './bisect_microphysics.sh reset' to clean up"
+    else
+        # Get the next commit to test from bisect
+        cd extern/Microphysics
+        local next_commit=$(git rev-list --bisect)
+        if [ -n "$next_commit" ]; then
+            print_status "Checking out next commit to test: $next_commit"
+            git checkout $next_commit
+        fi
+        cd ../..
+        check_bisect_status
+    fi
 }
 
 # Function to mark commit as bad  
 mark_bad() {
     print_status "Marking current commit as bad..."
     cd extern/Microphysics
-    git bisect bad
+    
+    # Capture the output to check if bisect is complete
+    local bisect_output=$(git bisect bad 2>&1)
+    echo "$bisect_output"
+    
     cd ../..
     
-    # Update submodule to the next commit identified by bisect
-    git submodule update --recursive
-    
-    check_bisect_status
+    # Check if bisect found the first bad commit
+    if echo "$bisect_output" | grep -q "is the first bad commit"; then
+        print_success "Bisect complete! Found the first bad commit:"
+        echo "$bisect_output" | grep -A10 "is the first bad commit"
+        print_status "You can now run './bisect_microphysics.sh reset' to clean up"
+    else
+        # Get the next commit to test from bisect
+        cd extern/Microphysics
+        local next_commit=$(git rev-list --bisect)
+        if [ -n "$next_commit" ]; then
+            print_status "Checking out next commit to test: $next_commit"
+            git checkout $next_commit
+        fi
+        cd ../..
+        check_bisect_status
+    fi
 }
 
 # Function to check bisect status
@@ -232,8 +265,16 @@ check_bisect_status() {
         print_status "Current bisect status:"
         git bisect log | head -20
         
-        # Check if bisect is complete
-        if git status | grep -q "You are currently bisecting"; then
+        # Check if bisect is complete by looking for the "first bad commit" message
+        local bisect_output=$(git bisect log 2>&1)
+        if echo "$bisect_output" | grep -q "is the first bad commit"; then
+            print_success "Bisect complete! The first bad commit has been found."
+            git bisect log | grep -A5 "is the first bad commit" || true
+        elif git rev-list --bisect 2>/dev/null | wc -l | grep -q "^0"; then
+            # Alternative check: no more commits to test
+            print_success "Bisect complete! The first bad commit has been identified."
+            print_status "Run 'git bisect log' in extern/Microphysics to see the full history"
+        elif git status | grep -q "You are currently bisecting"; then
             local current_commit=$(git log --oneline -1)
             print_status "Next commit to test: $current_commit"
             print_status "Run './bisect_microphysics.sh test' to test this commit"
