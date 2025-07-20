@@ -147,13 +147,13 @@ run_test() {
     
     # Capture output and check for success
     if timeout 300 ./src/problems/HydroContact/test_hydro_contact ../$INPUT_FILE > test_output.log 2>&1; then
-        # Check if the test passed by looking for error norm
-        if grep -q "ERROR NORM.*= 0" test_output.log 2>/dev/null; then
+        # Check if the test passed by looking for error norm (case insensitive)
+        if grep -iq "error norm.*= 0" test_output.log 2>/dev/null; then
             print_success "Test PASSED - Error norm is exactly zero"
             cd ..
             return 0
-        elif grep -q "ERROR NORM" test_output.log; then
-            local error_norm=$(grep "ERROR NORM" test_output.log | tail -1)
+        elif grep -iq "error norm" test_output.log; then
+            local error_norm=$(grep -i "error norm" test_output.log | tail -1)
             print_error "Test FAILED - $error_norm"
             cd ..
             return 1
