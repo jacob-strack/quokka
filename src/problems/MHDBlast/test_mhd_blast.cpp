@@ -160,7 +160,8 @@ template <> void QuokkaSimulation<MHDBlast>::ComputeDerivedVar(int lev, std::str
 
 auto problem_main() -> int
 {
-	const int nvars_cc = Physics_Indices<MHDBlast>::nvarTotal_cc;
+        amrex::Gpu::KernelInfo::setProfilingEnabled(true);
+        const int nvars_cc = Physics_Indices<MHDBlast>::nvarTotal_cc;
 	amrex::Vector<amrex::BCRec> BCs_cc(nvars_cc);
 	for (int icomp = 0; icomp < nvars_cc; ++icomp) {
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
