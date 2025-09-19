@@ -348,7 +348,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	void writeReconstructedStatesToDisk(std::array<amrex::MultiFab, AMREX_SPACEDIM> const &leftState,
 					    std::array<amrex::MultiFab, AMREX_SPACEDIM> const &rightState, int lev, int step);
 	void WriteSingleLevelPlotfileSimplified(const std::string &plotfile_prefix, const amrex::MultiFab &mf, 
-	                             const amrex::Vector<std::string> &compNames, int lev);
+	                             const amrex::Vector<std::string> &compNames, int lev, int single_level_interval = 1);
 
 	// ABOUTME: Used to handle universal refinement during checkpoint restart operations
 	struct RefinementContext {
@@ -1327,8 +1327,11 @@ template <typename problem_t>
 void AMRSimulation<problem_t>::WriteSingleLevelPlotfileSimplified(const std::string &plotfile_prefix, 
                                                           const amrex::MultiFab &mf, 
                                                           const amrex::Vector<std::string> &compNames, 
-                                                          int lev)
+                                                          int lev, int single_level_interval)
 {
+	if (istep[lev] + 1 % single_level_interval != 0) {
+		return;
+	}
 	const auto plotfile_name = CustomPlotFileName(plotfile_prefix.c_str(), istep[lev] + 1);
 	WriteSingleLevelPlotfile(plotfile_name, mf, compNames, geom[lev], tNew_[lev], istep[lev] + 1);
 }
@@ -1380,7 +1383,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 
 				const int lev_debug = 0;
 				amrex::Vector<std::string> flatCompNames{"rhs_buffer"};
-				WriteSingleLevelPlotfileSimplified("debug_rhs_buffer", rhs_buffer[lev_debug], flatCompNames, lev_debug);
+				WriteSingleLevelPlotfileSimplified("debug_rhs_buffer", rhs_buffer[lev_debug], flatCompNames, lev_debug, 20);
 
 				// apply roundoff to buffer before adding to rhs
 				for (int lev = 0; lev <= finest_level; ++lev) {
@@ -1388,9 +1391,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 				}
 
 				flatCompNames = {"rhs_buffer"};
-				// if (istep[lev_debug] + 1 % plotfileInterval_ == 0) {
-					WriteSingleLevelPlotfileSimplified("debug_rhs_buffer2", rhs_buffer[lev_debug], flatCompNames, lev_debug);
-				// }
+				WriteSingleLevelPlotfileSimplified("debug_rhs_buffer2", rhs_buffer[lev_debug], flatCompNames, lev_debug, 20);
 
 				// add buffer to rhs
 				for (int lev = 0; lev <= finest_level; ++lev) {
