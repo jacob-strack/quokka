@@ -348,7 +348,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	void writeReconstructedStatesToDisk(std::array<amrex::MultiFab, AMREX_SPACEDIM> const &leftState,
 					    std::array<amrex::MultiFab, AMREX_SPACEDIM> const &rightState, int lev, int step);
 	void WriteSingleLevelPlotfileSimplified(const std::string &plotfile_prefix, const amrex::MultiFab &mf, 
-	                             const amrex::Vector<std::string> &compNames, int lev, int single_level_interval = 1);
+	                             const amrex::Vector<std::string> &compNames, int lev, int interval = 1);
 
 	// ABOUTME: Used to handle universal refinement during checkpoint restart operations
 	struct RefinementContext {
@@ -1327,13 +1327,13 @@ template <typename problem_t>
 void AMRSimulation<problem_t>::WriteSingleLevelPlotfileSimplified(const std::string &plotfile_prefix, 
                                                           const amrex::MultiFab &mf, 
                                                           const amrex::Vector<std::string> &compNames, 
-                                                          int lev, int single_level_interval)
+                                                          int lev, int interval)
 {
-	if (istep[lev] + 1 % single_level_interval != 0) {
+	if ((istep[lev] % interval) != 0) {
 		return;
 	}
-	const auto plotfile_name = CustomPlotFileName(plotfile_prefix.c_str(), istep[lev] + 1);
-	WriteSingleLevelPlotfile(plotfile_name, mf, compNames, geom[lev], tNew_[lev], istep[lev] + 1);
+	const auto plotfile_name = CustomPlotFileName(plotfile_prefix.c_str(), istep[lev]);
+	WriteSingleLevelPlotfile(plotfile_name, mf, compNames, geom[lev], tNew_[lev], istep[lev]);
 }
 
 template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLevels()
