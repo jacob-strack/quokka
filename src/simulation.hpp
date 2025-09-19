@@ -1330,7 +1330,7 @@ void AMRSimulation<problem_t>::WriteSingleLevelPlotfileSimplified(const std::str
                                                           int lev)
 {
 	const auto plotfile_name = CustomPlotFileName(plotfile_prefix.c_str(), istep[lev] + 1);
-	WriteSingleLevelPlotfile(plotfile_name, mf, compNames, geom[lev], time, istep[lev] + 1);
+	WriteSingleLevelPlotfile(plotfile_name, mf, compNames, geom[lev], tNew_[lev], istep[lev] + 1);
 }
 
 template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLevels()
