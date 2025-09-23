@@ -47,10 +47,27 @@ template <> struct Physics_Traits<AgoraGalaxy> {
 	static constexpr bool is_hydro_enabled = true;
 	static constexpr bool is_self_gravity_enabled = true;
 	static constexpr bool is_radiation_enabled = false;
-	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool is_mhd_enabled = true;
 	static constexpr int numMassScalars = 0;		     // number of mass scalars
 	static constexpr int numPassiveScalars = numMassScalars + 0; // number of passive scalars
 	static constexpr int nGroups = 1;			     // number of radiation groups
+};
+
+constexpr double B0 = 1e-16; 
+
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE auto B_x(double xL, double yL, double zL, const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> &dx) -> double
+{
+	return 0.0;
+};
+
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE auto B_y(double xL, double yL, double zL, const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> &dx) -> double
+{
+	return 0.0;
+};
+
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE auto B_z(double xL, double yL, double zL, const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> &dx) -> double
+{
+	return B0;
 };
 
 template <> struct Particle_Traits<AgoraGalaxy> {
@@ -270,6 +287,31 @@ template <> void QuokkaSimulation<AgoraGalaxy>::setInitialConditionsOnGrid(quokk
 	});
 }
 
+template <> void QuokkaSimulation<AgoraGalaxy>::setInitialConditionsOnGridFaceVars(quokka::grid const &grid_elem)
+{
+	const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dx = grid_elem.dx_; 
+	const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> prob_lo = grid_elem.prob_lo_; 
+	const amrex::Array4<double> &state_fc = grid_elem.array_; 
+	const amrex::Box &indexRange = grid_elem.indexRange_; 
+	const quokka::direction dir = grid_elem.dir_; 
+	amrex::ParallelFor(indexRange, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+		const double xL = prob_lo[0] + (i*dx[0]); 
+		const double yL = prob_lo[1] + (j*dx[1]); 
+		const double zL = prob_lo[2] + (k*dx[2]); 
+
+		if(dir == quokka::direction::x){
+			state_fc(i,j,k, Physics_Indices<AgoraGalaxy>::mhdFirstIndex) = B_x(xL, yL, zL, dx);
+			}
+		else if(dir == quokka::direction::y){
+			state_fc(i, j, k, Physics_Indices<AgoraGalaxy>::mhdFirstIndex) = B_y(xL, yL, zL, dx);
+			}
+		else if(dir == quokka::direction::z){
+			state_fc(i, j, k, Physics_Indices<AgoraGalaxy>::mhdFirstIndex) = B_z(xL, yL, zL, dx);
+			}
+	});
+
+}
+
 template <> void QuokkaSimulation<AgoraGalaxy>::createInitialCICParticles()
 {
 	// read particles from ASCII file
@@ -390,8 +432,22 @@ auto problem_main() -> int
 		}
 	}
 
+	const int nvars_fc = Physics_Indices<AgoraGalaxy>::nvarTotal_fc;
+	amrex::Vector<amrex::BCRec> BCs_fc(nvars_fc);
+	for (int icomp = 0; icomp < nvars_fc; ++icomp) {
+		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+			if(isNormalComp(icomp, idim)){
+				BCs_cc[icomp].setLo(idim, amrex::BCType::reflect_odd);
+				BCs_cc[icomp].setHi(idim, amrex::BCType::reflect_odd);
+			} else {
+				BCs_fc[icomp].setLo(idim, amrex::BCType::reflect_even); 
+				BCs_fc[icomp].setHi(idim, amrex::BCType::reflect_even);
+			}
+		}
+	}
+	
 	// Problem initialization
-	QuokkaSimulation<AgoraGalaxy> sim(BCs_cc);
+	QuokkaSimulation<AgoraGalaxy> sim(BCs_cc, BCs_fc);
 
 	// initialize
 	sim.setInitialConditions();
