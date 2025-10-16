@@ -33,6 +33,11 @@ endif()
 # HDF5
 find_package(HDF5 REQUIRED)
 
+#boost
+find_package(Boost REQUIRED)
+include_directories(${Boost_INCLUDE_DIRS})
+
+
 # std::filesystem (required for GCC < 9)
 if (NOT ((CMAKE_SYSTEM_NAME MATCHES "Darwin") AND ((CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang") OR (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"))))
     link_libraries(stdc++fs)
@@ -117,6 +122,7 @@ include_directories(${amrex_INCLUDE_DIRS_RET})
 include_directories(${fmt_INCLUDE_DIRS_RET})
 include_directories(${HDF5_INCLUDE_DIRS_RET})
 include_directories(${Boost_INCLUDE_DIRS_RET})
+message(STATUS "boost include ${Boost_INCLUDE_DIRS_RET}")
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
 # default network_name (for Microphysics EOS) for all tests:
