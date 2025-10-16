@@ -316,6 +316,8 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 
 	void particleMeshInteraction(amrex::Real time, amrex::Real dt);
 
+	void particleMeshInteraction_fc(amrex::Real time, amrex::Real dt, quokka::direction dir); 
+
 	// boundary condition
 	AMREX_GPU_DEVICE static void setCustomBoundaryConditions(const amrex::IntVect &iv, amrex::Array4<amrex::Real> const &dest, int dcomp, int numcomp,
 								 amrex::GeometryData const &geom, amrex::Real time, const amrex::BCRec *bcr, int bcomp,
@@ -1203,6 +1205,8 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 
 				// TODO(cch): Need to take care of AMR subcycling
 				particleMeshInteraction(cur_time, dt_[0]);
+				for(int idim = 0; idim < AMREX_SPACEDIM; idim++)
+					particleMeshInteraction_fc(cur_time, dt_[0], static_cast<quokka::direction>(idim)); 
 			}
 
 			// Use the new type-aware particle destruction method
@@ -1554,7 +1558,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 {
 	const BL_PROFILE("AMRSimulation::particleMeshInteraction()");
 	// Need 4 ghost cells for SN deposition with a SNR radius of 3 dx.
-	const int nghost = 4;
+	const int nghost = 6;
 
 	// Assume all SN progenitors are at the finest level
 	const int lev = finest_level;
@@ -1581,6 +1585,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 	// Deposit the SN particles into the MultiFab
 	const amrex::Real max_velocity = particleRegister_.depositSN(state_new_cc_[lev], lev, time, dt);
 
+
 	// Check if the maximum velocity is greater than the threshold
 	constexpr amrex::Real v_over_c_threshold = 0.03;
 	if (max_velocity > v_over_c_threshold * C::c_light) {
@@ -1589,7 +1594,20 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 			       << "\n";
 	}
 }
+
+template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInteraction_fc(amrex::Real time, amrex::Real dt, quokka::direction dir)
+{
+	//leave if no mhd or no magnetic feedback 
+	if constexpr (!Physics_Traits<problem_t>::is_mhd_enabled || !Physics_Traits<problem_t>::SN_magnetic_feedback_enabled)
+		return;
+	const int lev = finest_level;
+        //zero magnetic field for testing
+	//state_new_fc_[lev][static_cast<int>(dir)].setVal(0.); 	
+	//deposit magnetic feedback 
+	particleRegister_.depositSN_fc(state_new_fc_[lev][static_cast<int>(dir)], lev, dir, time, dt, 262*3.086e18, 0.2*3.154e13); 
+}
 #endif // AMREX_SPACEDIM == 3
+
 
 // N.B.: This function actually works for subcycled or not subcycled, as long as
 // nsubsteps[lev] is set correctly.

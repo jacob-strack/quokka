@@ -64,7 +64,8 @@ template <> struct Physics_Traits<SNProblem> {
 	static constexpr int numPassiveScalars = numMassScalars + 0; // number of passive scalars
 	static constexpr bool is_radiation_enabled = false;
 	// face-centred
-	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool is_mhd_enabled = true;
+	static constexpr bool SN_magnetic_feedback_enabled = true; 
 	static constexpr int nGroups = 1; // number of radiation groups
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };
@@ -72,7 +73,7 @@ template <> struct Physics_Traits<SNProblem> {
 template <> void QuokkaSimulation<SNProblem>::createInitialTestParticles()
 {
 	// read particles from ASCII file
-	const int nreal_extra = 7; // mass vx vy vz birth_time death_time lum
+	const int nreal_extra = 10; // mass vx vy vz birth_time death_time lum alpha_Euler beta_Euler gamma_Euler
 	TestParticles->SetVerbose(1);
 	TestParticles->InitFromAsciiFile(SN_particles_file, nreal_extra, nullptr);
 
@@ -184,6 +185,20 @@ auto problem_main() -> int
 		}
 	}
 
+	const int nvars_fc = Physics_Indices<SNProblem>::nvarTotal_fc;
+	amrex::Vector<amrex::BCRec> BCs_fc(nvars_fc);
+	for (int icomp = 0; icomp < nvars_fc; ++icomp) {
+		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+			if(isNormalComp(icomp, idim)){
+				BCs_fc[icomp].setLo(idim, amrex::BCType::reflect_odd);
+				BCs_fc[icomp].setHi(idim, amrex::BCType::reflect_odd);
+			} else {
+				BCs_fc[icomp].setLo(idim, amrex::BCType::reflect_even); 
+				BCs_fc[icomp].setHi(idim, amrex::BCType::reflect_even);
+			}
+		}
+	}
+
 	// get n_amb from the input file
 	amrex::ParmParse const pp("problem");
 	pp.query("n_amb", n_amb);
@@ -196,7 +211,7 @@ auto problem_main() -> int
 	cpp.query("cooling_table_type", coolingTableType_);
 
 	// Problem initialization
-	QuokkaSimulation<SNProblem> sim(BCs_cc);
+	QuokkaSimulation<SNProblem> sim(BCs_cc, BCs_fc);
 
 	sim.reconstructionOrder_ = 3; // 2=PLM, 3=PPM
 	sim.stopTime_ = t_stop * year;

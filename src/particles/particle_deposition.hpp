@@ -13,7 +13,8 @@
 #include "AMReX_REAL.H"
 #include "hydro/hydro_system.hpp"
 #include "particles/particle_types.hpp"
-
+#include "grid.hpp"
+#include "gamma/math/special_functions/gamma.hpp"
 namespace quokka
 {
 
@@ -112,6 +113,68 @@ depositThermalSNR(amrex::Array4<amrex::Real> const &local_buffer, const int ix, 
 							     SNR_energy_per_cell);
 			}
 		}
+	}
+}
+
+//routine to add supernova feedback
+
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE auto A_z(double dx, double dy, double dz, double sn_time_active, double L, double tau, double timestep) -> double
+{
+	//dx,dy,dz are the lengths from cell center to sn
+	double r = sqrt(dx*dx + dy*dy + dz*dz); 
+	double R = sqrt(dx*dx + dy*dy);
+        if(r > 3*L)
+		return 0; 
+	if(sn_time_active > 5*tau)
+		return 0;	
+	double V_sn = (4/3) * 3.141 * pow(L,3); 
+	float B0 = 1e5 * (64/3) * 3.3e48 / V_sn;
+	return -1 * B0 * pow(2, -1/4) * (L/tau) * timestep * exp(-sn_time_active / tau) * exp(-dz*dz / (2*L*L)) * boost::math::gamma_p(0.75, R*R/(2*L*L)); 
+};
+
+
+template <typename problem_t>
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE 
+void depositMagneticSeedField(amrex::Array4<amrex::Real> const &local_buffer, quokka::direction dir, const int ix, const int iy, const int iz, const double L, const double tau, const double timestep,const amrex::Real vol_inverse, const amrex::Real sp_deathtime, const amrex::Real step_end_time, const amrex::Real pos_x, const amrex::Real pos_y, const amrex::Real pos_z, const amrex::Real Euler_alpha, const amrex::Real Euler_beta, const amrex::Real Euler_gamma, const amrex::GpuArray<amrex::GpuArray<amrex::GpuArray<amrex::Real, SN_stencil_array_size>, SN_stencil_array_size>, SN_stencil_array_size> &stencil_weights_gpu, const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> &prob_lo, const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> &dx) noexcept 
+{
+	//function that deposits magnetic seed fields onto grids 
+	//inputs: 
+	//ix, iy, iz indices on grid
+	//L, tau characteristic length and time scales for SN magnetic feedback 
+	//vol_inverse inverse of volume in which field will be distributed 
+	//sp_deathtime time where star becomes SN remnant 
+	//pos_x, pos_y, pos_z particle positions 
+	
+	//time since SN Magnetic feedback began
+	const double time_active = step_end_time - sp_deathtime;  
+        int SN_stencil_size = 5; //testing larger stencil for magnetic feedback (you MUST change nghost if this gets changed)	
+	for(int kk = -SN_stencil_size; kk <= SN_stencil_size; ++kk){ 
+		for(int jj = -SN_stencil_size; jj <= SN_stencil_size; ++jj){
+			for(int ii = -SN_stencil_size; ii <= SN_stencil_size; ++ii){
+				//get the correct vector potential for the current time and position
+				//and take the curl
+			        auto Bx = [=](double xL, double yL, double zL) {return (A_z(xL, yL + dx[1], zL, time_active, L, tau, timestep) - A_z(xL, yL - dx[1], zL, time_active, L, tau, timestep)) / (2*dx[1]);};
+				auto By = [=](double xL, double yL, double zL) {return (A_z(xL - dx[0], yL, zL, time_active, L, tau, timestep) - A_z(xL + dx[0], yL,zL, time_active, L, tau, timestep)) / (2*dx[0]);};		
+				const double this_xL = prob_lo[0] + (ix + ii) * dx[0] - pos_x; 
+				const double this_yL = prob_lo[1] + (iy + jj) * dx[1] - pos_y; 
+				const double this_zL = prob_lo[2] + (iz + kk) * dx[2] - pos_z; 
+				const double bx = Bx(this_xL, this_yL, this_zL); 
+				const double by = By(this_xL, this_yL, this_zL);
+				//apply random rotation using Euler angles
+			        const double bx_p = cos(Euler_alpha) * cos(Euler_beta) * bx + (cos(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) - sin(Euler_alpha)*cos(Euler_gamma))*by; 
+				const double by_p = sin(Euler_alpha) * cos(Euler_beta) * bx + (sin(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) + cos(Euler_alpha)*cos(Euler_gamma))*by; 
+				const double bz_p = -1*sin(Euler_beta)*bx + cos(Euler_beta)*sin(Euler_gamma)*by; 
+				if(dir == quokka::direction::x){
+					amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bx_p);
+				}
+				if(dir == quokka::direction::y){
+					amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), by_p);
+				}
+				if(dir == quokka::direction::z){
+					amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bz_p);
+				}
+			}
+		}	
 	}
 }
 
@@ -316,6 +379,91 @@ void depositToBuffer(ContainerType *container, amrex::MultiFab &state, amrex::Mu
 	}
 }
 
+template <typename ContainerType, typename problem_t>
+void depositToBuffer_fc(ContainerType *container, amrex::MultiFab &state_buffer, int lev, quokka::direction dir, amrex::Real this_time, amrex::Real dt, int evolutionStageIndex, int birthTimeIndex, const double L, const double tau)
+{
+	//error checking using quokka::centering is probably a good idea 
+	//maybe pass quokka::centering as a parameter and leave if wrong
+	const BL_PROFILE("SNFeedbackUtils::depositToBuffer_fc()"); 
+	constexpr amrex::Real stencil_volume = 4.0 / 3.0 * M_PI * SN_stencil_size * SN_stencil_size * SN_stencil_size;
+	constexpr amrex::GpuArray<amrex::GpuArray<amrex::GpuArray<amrex::Real, SN_stencil_array_size>, SN_stencil_array_size>, SN_stencil_array_size>
+	    stencil_weights_gpu = {{{{{0.00884198143074, 0.00884198143074, 0.00884198143074, 0.00416240696843},
+				      {0.00884198143074, 0.00884198143074, 0.00884198143074, 0.00262865918549},
+				      {0.00884198143074, 0.00884198143074, 0.00596795726055, 0.00005052308190},
+				      {0.00416240696843, 0.00262865918549, 0.00005052308190, 0.00000000000000}}},
+				    {{{0.00884198143074, 0.00884198143074, 0.00884198143074, 0.00262865918549},
+				      {0.00884198143074, 0.00884198143074, 0.00861063982859, 0.00119306623841},
+				      {0.00884198143074, 0.00861063982859, 0.00400459528385, 0.00000136166514},
+				      {0.00262865918549, 0.00119306623841, 0.00000136166514, 0.00000000000000}}},
+				    {{{0.00884198143074, 0.00884198143074, 0.00596795726055, 0.00005052308190},
+				      {0.00884198143074, 0.00861063982859, 0.00400459528385, 0.00000136166514},
+				      {0.00596795726055, 0.00400459528385, 0.00045652034325, 0.00000000000000},
+				      {0.00005052308190, 0.00000136166514, 0.00000000000000, 0.00000000000000}}},
+				    {{{0.00416240696843, 0.00262865918549, 0.00005052308190, 0.00000000000000},
+				      {0.00262865918549, 0.00119306623841, 0.00000136166514, 0.00000000000000},
+				      {0.00005052308190, 0.00000136166514, 0.00000000000000, 0.00000000000000},
+				      {0.00000000000000, 0.00000000000000, 0.00000000000000, 0.00000000000000}}}}};
+
+	const amrex::Real step_end_time = this_time + dt;
+
+	//deposit in each box 
+	for (typename ContainerType::ParIterType pti(*container, lev); pti.isValid(); ++pti) {
+		auto &particles = pti.GetArrayOfStructs();
+		auto *pData = particles().data();
+		const amrex::Long np = pti.numParticles();
+
+		// Get the local deposit array for this box
+		const auto &local_buffer = state_buffer.array(pti);
+
+		// Get geometry information for this level
+		const auto &geom = container->Geom(lev);
+		const auto plo = geom.ProbLoArray();
+		const auto dxi = geom.InvCellSizeArray();
+		const auto dx = geom.CellSizeArray();
+
+		// Calculate inverse cell volume
+		const amrex::Real vol_inverse = AMREX_D_TERM(dxi[0], *dxi[1], *dxi[2]);
+		const amrex::Real vol = AMREX_D_TERM(dx[0], *dx[1], *dx[2]);
+
+
+		// Deposit particle data into the local buffer
+		amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE(int64_t idx) {
+			auto &p = pData[idx]; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+			
+			const amrex::Real sp_deathtime = p.rdata(birthTimeIndex + 1); 
+
+			const amrex::Real ppos_x = p.pos(0); 
+			const amrex::Real ppos_y = p.pos(1); 
+			const amrex::Real ppos_z = p.pos(2); 
+
+			//cell indices for particle's home 
+			const int ix = static_cast<int>(amrex::Math::floor((ppos_x - plo[0]) / dx[0])); 
+			const int iy = static_cast<int>(amrex::Math::floor((ppos_y - plo[1]) / dx[1])); 
+			const int iz = static_cast<int>(amrex::Math::floor((ppos_z - plo[2]) / dx[2]));
+			
+			//add angles that define a random orientation for magnetic SN feedback if needed 
+			if(step_end_time > sp_deathtime && this_time <= sp_deathtime){
+				srand(time(0)); //seed 
+				//Euler angles
+				double Euler_alpha = ((double)rand()) / RAND_MAX * 2 * 3.141; 
+				double Euler_beta = ((double)rand()) / RAND_MAX * 3.141;
+				double Euler_gamma = ((double)rand()) / RAND_MAX * 2 * 3.141;
+				std::cout << Euler_alpha << " " << Euler_beta << " " << Euler_gamma << " " << std::endl;
+				p.rdata(p.NReal - 3) = Euler_alpha; 
+				p.rdata(p.NReal - 2) = Euler_beta; 
+				p.rdata(p.NReal - 1) = Euler_gamma;
+				std::cout << p.NReal << std::endl;
+				std::cout << p.rdata(p.NReal - 7) << " " << p.rdata(p.NReal - 6) << " " << p.rdata(p.NReal - 5) << " " << p.rdata(p.NReal - 4) << " " << p.rdata(p.NReal - 3) << " "  << p.rdata(p.NReal - 2) << " " << p.rdata(p.NReal - 1) << " " << std::endl;
+				
+			}	
+			std::cout << p.rdata(1) << " " << p.rdata(2) << " " << p.rdata(3) << std::endl;	
+			if(step_end_time > sp_deathtime)
+				depositMagneticSeedField<problem_t>(local_buffer, dir, ix, iy, iz, L, tau, dt, vol_inverse, sp_deathtime, step_end_time, ppos_x, ppos_y, ppos_z, p.rdata(p.NReal - 3), p.rdata(p.NReal - 2), p.rdata(p.NReal - 1), stencil_weights_gpu, plo, dx);
+			});
+	}
+	
+}
+
 template <typename problem_t>
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE void addCompositeBufferToState(amrex::Array4<amrex::Real> const &local_state,
 								   amrex::Array4<amrex::Real> const &local_buffer, int i, int j, int k,
@@ -490,6 +638,16 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE void addThermalOnlyBufferToState(amrex::Arra
 	amrex::Gpu::Atomic::Max(&p_max_velocity[0], cs);
 }
 
+template <typename problem_t> 
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE void addMagneticBufferToState(amrex::Array4<amrex::Real> const &local_state, amrex::Array4<amrex::Real> const &local_buffer, int i, int j, int k)
+{
+	const Real dB = local_buffer(i, j, k, Physics_Indices<problem_t>::mhdFirstIndex); 
+	//something happened and no feedback i.e. distance > 5*L or t > 3*tau
+	if(dB == 0.0)
+		return;	
+	local_state(i, j, k, Physics_Indices<problem_t>::mhdFirstIndex) += dB;
+}	 
+
 template <typename problem_t>
 void addBufferToState(amrex::MultiFab &state, amrex::MultiFab &state_buffer, const SNScheme SN_scheme_d, amrex::Real *p_max_velocity)
 {
@@ -509,6 +667,23 @@ void addBufferToState(amrex::MultiFab &state, amrex::MultiFab &state_buffer, con
 			}
 		});
 	}
+}
+
+template <typename problem_t>
+void addBufferToState_fc(amrex::MultiFab &state, amrex::MultiFab &state_buffer)
+{
+	const BL_PROFILE("SNFeedbackUtils::addBufferToState_fc"); 
+	for (amrex::MFIter mfi(state); mfi.isValid(); ++mfi) {
+		const amrex::Box &box = mfi.validbox();
+		auto const &local_state = state.array(mfi);
+		auto const &local_buffer = state_buffer.array(mfi);
+
+		// add buffer to state
+		amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+			addMagneticBufferToState<problem_t>(local_state, local_buffer, i, j, k); 
+		});
+	}
+
 }
 
 // Function to update particle evolution stages from SNProgenitor to SNRemnant
@@ -578,6 +753,28 @@ auto SNDeposition(ContainerType *container, amrex::MultiFab &state, amrex::Multi
 
 	return max_velocity;
 }
+
+
+template <typename ContainerType, typename problem_t>
+void SNDeposition_fc(ContainerType *container, amrex::MultiFab &state, amrex::MultiFab &state_buffer, int lev, quokka::direction dir, amrex::Real time, amrex::Real dt, int evolutionStageIndex, int birthTimeIndex, const double L, const double tau)
+{
+	const BL_PROFILE("[particle deposition] SNDeposition_fc()"); 
+	static_assert(SN_stencil_size <=3, "SN_stencil size must be >= 3"); 
+
+	//make sure buffer is zeroed out 
+	state_buffer.setVal(0); 
+
+	//Fill buffer from particles 
+	SNFeedbackUtils::depositToBuffer_fc<ContainerType, problem_t>(container, state_buffer, lev, dir, time, dt, evolutionStageIndex, birthTimeIndex, L, tau);
+
+	//sum boundary values 
+	state_buffer.SumBoundary(container->Geom(lev).periodicity()); 
+
+	//add buffer to state 
+	SNFeedbackUtils::addBufferToState_fc<problem_t>(state, state_buffer);	
+
+}
+
 
 #endif // AMREX_SPACEDIM == 3
 

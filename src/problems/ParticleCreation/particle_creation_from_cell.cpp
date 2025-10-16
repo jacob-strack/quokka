@@ -62,6 +62,7 @@ template <> struct Physics_Traits<TestParticle> {
 	static constexpr double gravitational_constant = 1.0;
 	static constexpr double c_light = 1.0;
 	static constexpr double radiation_constant = 1.0;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 };
 
 template <> void QuokkaSimulation<TestParticle>::createInitialTestParticles()

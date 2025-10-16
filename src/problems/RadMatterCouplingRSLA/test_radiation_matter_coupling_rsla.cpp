@@ -56,6 +56,7 @@ template <> struct Physics_Traits<CouplingProblem> {
 	static constexpr bool is_radiation_enabled = true;
 	// face-centred
 	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 	static constexpr int nGroups = 1; // number of radiation groups
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };

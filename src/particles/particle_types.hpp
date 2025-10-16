@@ -98,9 +98,9 @@ enum RadParticleDataIdx {
 template <typename problem_t>
 constexpr int RadParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 2 + Physics_Traits<problem_t>::nGroups; // birth_time death_time lum1 ... lumN
+		return 2 + Physics_Traits<problem_t>::nGroups + 3; // birth_time death_time lum1 ... lumNa Euler
 	} else {
-		return 2; // birth_time death_time
+		return 2 + 3; // birth_time death_time Euler
 	}
 }();
 
@@ -120,8 +120,8 @@ enum CICParticleDataIdx {
 	CICParticleVzIdx	// Velocity in z direction
 };
 
-// Number of real components for CIC_particles, mass + 3 velocity components
-constexpr int CICParticleRealComps = 4;
+// Number of real components for CIC_particles, mass + 3 velocity components + 3 Euler angles for random orientation of magnetic SN feedback
+constexpr int CICParticleRealComps = 4 + 3;
 
 // Type definitions for CIC_particles container and iterator
 using CICParticleContainer = amrex::AmrParticleContainer<CICParticleRealComps>;
@@ -144,9 +144,9 @@ enum CICRadParticleDataIdx {
 template <typename problem_t>
 constexpr int CICRadParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 6 + Physics_Traits<problem_t>::nGroups; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
+		return 6 + Physics_Traits<problem_t>::nGroups + 3; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups], Euler
 	} else {
-		return 6; // mass, vx, vy, vz, birth_time, death_time
+		return 6 + 3; // mass, vx, vy, vz, birth_time, death_time, Euler
 	}
 }();
 
@@ -184,9 +184,9 @@ constexpr int StochasticStellarPopParticleStageIdx = 0; // Evolution stage of th
 template <typename problem_t>
 constexpr int StochasticStellarPopParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 6 + Physics_Traits<problem_t>::nGroups; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
+		return 6 + Physics_Traits<problem_t>::nGroups + 3; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
 	} else {
-		return 6; // mass, vx, vy, vz, birth_time, death_time
+		return 6 + 3; // mass, vx, vy, vz, birth_time, death_time
 	}
 }();
 
@@ -219,9 +219,9 @@ constexpr int TestParticleStageIdx = 0; // Evolution stage of the particle, inde
 template <typename problem_t>
 constexpr int TestParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 6 + Physics_Traits<problem_t>::nGroups; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
+		return 6 + Physics_Traits<problem_t>::nGroups + 3; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
 	} else {
-		return 6; // mass, vx, vy, vz, birth_time, death_time
+		return 6 + 3; // mass, vx, vy, vz, birth_time, death_time
 	}
 }();
 

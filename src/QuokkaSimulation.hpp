@@ -490,6 +490,7 @@ template <typename problem_t> void QuokkaSimulation<problem_t>::readParmParse()
 		hpp.query("emf_averaging_method", emfAveragingType_);
 		hpp.query("emf_reconstruction_order", emfReconstructionOrder_);
 		hpp.query("emf_scheme", emf_scheme_);
+		std::cout << "mhd emf avging method: " << static_cast<int>(emfAveragingType_) << std::endl;
 	}
 
 	// set cooling runtime parameters

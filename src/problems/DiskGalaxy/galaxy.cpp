@@ -51,6 +51,7 @@ template <> struct Physics_Traits<AgoraGalaxy> {
 	static constexpr int numMassScalars = 0;		     // number of mass scalars
 	static constexpr int numPassiveScalars = numMassScalars + 0; // number of passive scalars
 	static constexpr int nGroups = 1;			     // number of radiation groups
+	static constexpr bool SN_magnetic_feedback_enabled = true; 
 };
 
 constexpr double B0 = 1e-16; 
@@ -298,7 +299,6 @@ template <> void QuokkaSimulation<AgoraGalaxy>::setInitialConditionsOnGridFaceVa
 		const double xL = prob_lo[0] + (i*dx[0]); 
 		const double yL = prob_lo[1] + (j*dx[1]); 
 		const double zL = prob_lo[2] + (k*dx[2]); 
-
 		if(dir == quokka::direction::x){
 			state_fc(i,j,k, Physics_Indices<AgoraGalaxy>::mhdFirstIndex) = B_x(xL, yL, zL, dx);
 			}
@@ -437,8 +437,8 @@ auto problem_main() -> int
 	for (int icomp = 0; icomp < nvars_fc; ++icomp) {
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			if(isNormalComp(icomp, idim)){
-				BCs_cc[icomp].setLo(idim, amrex::BCType::reflect_odd);
-				BCs_cc[icomp].setHi(idim, amrex::BCType::reflect_odd);
+				BCs_fc[icomp].setLo(idim, amrex::BCType::reflect_odd);
+				BCs_fc[icomp].setHi(idim, amrex::BCType::reflect_odd);
 			} else {
 				BCs_fc[icomp].setLo(idim, amrex::BCType::reflect_even); 
 				BCs_fc[icomp].setHi(idim, amrex::BCType::reflect_even);

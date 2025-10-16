@@ -35,6 +35,7 @@ template <> struct Physics_Traits<MHDBlast> {
 	static constexpr int numPassiveScalars = numMassScalars + 0; // number of passive scalars
 	static constexpr bool is_radiation_enabled = false;
 	static constexpr bool is_mhd_enabled = true;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 	static constexpr int nGroups = 1; // number of radiation groups
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };
@@ -160,7 +161,7 @@ template <> void QuokkaSimulation<MHDBlast>::ComputeDerivedVar(int lev, std::str
 
 auto problem_main() -> int
 {
-	amrex::Gpu::KernelInfo::setProfilingEnabled(true);
+	//amrex::Gpu::KernelInfo::setProfilingEnabled(true);
 	const int nvars_cc = Physics_Indices<MHDBlast>::nvarTotal_cc;
 	amrex::Vector<amrex::BCRec> BCs_cc(nvars_cc);
 	for (int icomp = 0; icomp < nvars_cc; ++icomp) {

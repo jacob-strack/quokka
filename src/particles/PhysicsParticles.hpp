@@ -137,6 +137,8 @@ class PhysicsParticleDescriptorBase
 	{
 		return 0.0_rt;
 	}
+	virtual void depositSN_fc(amrex::MultiFab & /*state*/, amrex::MultiFab & /*state_buffer*/, int /*lev*/, quokka::direction /*dir*/, amrex::Real /*time*/, amrex::Real /*dt*/, const double /*L*/, const double /*tar*/)
+	{ /* Default empty implementation */}
 
 	virtual void computeSinkAccretion(amrex::MultiFab &state, amrex::MultiFab &state_accretion_rate, int lev, amrex::Real time, amrex::Real dt)
 	{ /* Default empty implementation */ }
@@ -520,6 +522,7 @@ class StarParticleDescriptor : public PhysicsParticleDescriptor<ContainerType, p
 		this->setAllowsAccretion(allows_accretion);
 	}
 
+
 #if AMREX_SPACEDIM == 3
 	// Override updateParticleProperties for star particles
 	void updateParticleProperties(amrex::Real current_time) override
@@ -566,6 +569,20 @@ class StarParticleDescriptor : public PhysicsParticleDescriptor<ContainerType, p
 
 		return max_velocity;
 	}
+
+	// Implementation of magnetic supernova feedback
+	
+	void depositSN_fc(amrex::MultiFab &state, amrex::MultiFab &state_buffer, int lev, quokka::direction dir, amrex::Real time, amrex::Real dt, const double L, const double tau) override 
+	{
+		if(this->container_ != nullptr && this->getEvolutionStageIndex() >= 0){ //might be able to change the evolution stage index to something bigger 
+			if(!quokka::disable_SN_feedback){
+				//yell if not cgs 
+				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(Physics_Traits<problem_t>::unit_system == UnitSystem::CGS, "Use CGS Units"); 
+				SNDeposition_fc<ContainerType, problem_t>(this->container_, state, state_buffer, lev, dir, time, dt, this->getEvolutionStageIndex(), this->getBirthTimeIndex(), L, tau); 
+			}
+		}
+	}
+	
 
 	// compute accretion rate
 	void computeSinkAccretion(amrex::MultiFab &state, amrex::MultiFab &state_accretion_rate, int lev, amrex::Real time, amrex::Real dt) override
@@ -753,6 +770,20 @@ template <typename problem_t> class PhysicsParticleRegister
 		}
 		return max_velocity;
 	}
+
+	// Deposit supernova seed fields from recent deadees 
+	
+	void depositSN_fc(amrex::MultiFab &state, int lev, quokka::direction dir, amrex::Real time, amrex::Real dt, const double L, const double tau)
+	{
+		const BL_PROFILE("PhysicsParticleRegister::depositSN_fc()"); 
+		amrex::MultiFab state_buffer(state.boxArray(), state.DistributionMap(), state.nComp(), state.nGrow());
+		for (const auto &[type, descriptor] : particleRegistry_) {
+			if(descriptor->isStarParticle()){
+				descriptor->depositSN_fc(state, state_buffer, lev, dir, time, dt, L, tau);
+			}
+		}	
+	}
+	
 
 	// Implementation of computeSinkAccretion
 	void computeSinkAccretion(amrex::MultiFab &state, amrex::MultiFab &state_accretion_rate, int lev, amrex::Real time, amrex::Real dt)

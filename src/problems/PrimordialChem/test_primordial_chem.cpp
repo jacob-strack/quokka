@@ -52,6 +52,7 @@ template <> struct Physics_Traits<PrimordialChemTest> {
 	static constexpr bool is_radiation_enabled = false;
 	// face-centred
 	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 	static constexpr int nGroups = 1;
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };

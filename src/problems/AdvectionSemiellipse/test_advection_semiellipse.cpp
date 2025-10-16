@@ -39,6 +39,7 @@ template <> struct Physics_Traits<SemiellipseProblem> {
 	static constexpr bool is_radiation_enabled = false;
 	// face-centred
 	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };
 

@@ -54,6 +54,7 @@ template <> struct Physics_Traits<ShadowProblem> {
 	static constexpr int numPassiveScalars = numMassScalars + 0; // number of passive scalars
 	static constexpr bool is_radiation_enabled = true;
 	static constexpr bool is_mhd_enabled = false;
+	static constexpr bool SN_magnetic_feedback_enabled = false; 
 	static constexpr int nGroups = 1;
 	static constexpr UnitSystem unit_system = UnitSystem::CGS;
 };

@@ -385,7 +385,8 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 			// Check if the cell violates the Jeans condition but create a particle only if prob_star_formation > random draw
 			// eps_star is the fraction of gas mass that goes into star particles
 			// Checkout docs/star_formation for more details
-
+			if(0)
+				std::cout << "Jeans check: " << LambdaJ << " <? " << J*dx[0] << std::endl; 
 			if ((LambdaJ < J * dx[0]) &&
 			    random_draw < prob_star_formation) { // Create a particle only if LambdaJ < J*dx and prob_star_formation> random draw
 				const amrex::Real particle_mass = cell_density * cell_volume * eps_star;
@@ -393,6 +394,7 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 				amrex::Real const num_high_mass_stars_exp = m_high_tot / m_star_high_avg;
 				num_star = static_cast<int>(1 + (amrex::RandomPoisson(num_high_mass_stars_exp, engine)));
 			}
+			std::cout << "num new: " << num_star << std::endl;
 			return num_star;
 		}
 	};
@@ -456,7 +458,7 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 					// Set particle evolution stage to LowMassComposite if it is a low-mass stellar composite
 					// This gets changed in the for loop below if this is a high mass star
 					p.idata(evolution_stage_index) = static_cast<int>(StellarEvolutionStage::LowMassComposite);
-
+				
 					// Low Mass particle position at cell center
 					p.pos(0) = plo[0] + (i + 0.5) * dx[0];
 					p.pos(1) = plo[1] + (j + 0.5) * dx[1];
@@ -467,6 +469,7 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 					p.rdata(mass_idx + 1) = vx;
 					p.rdata(mass_idx + 2) = vy;
 					p.rdata(mass_idx + 3) = vz;
+
 
 					p.rdata(birth_time_index + 1) = std::numeric_limits<amrex::Real>::max();
 					if (p_idx > 0) {
