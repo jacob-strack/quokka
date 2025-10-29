@@ -278,12 +278,13 @@ template <> void QuokkaSimulation<AgoraGalaxy>::setInitialConditionsOnGrid(quokk
 		// compute auxiliary quantities
 		double const vsq = (vx * vx) + (vy * vy) + (vz * vz);
 		double const Eint = quokka::EOS<AgoraGalaxy>::ComputeEintFromTgas(rho, T);
+		double const Emag = 0.5 * (B_x(x0,y0,z0,dx)*B_x(x0,y0,z0,dx) + B_y(x0,y0,z0,dx)*B_y(x0,y0,z0,dx) + B_z(x0, y0, z0, dx)*B_z(x0,y0,z0,dx));
 
 		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::density_index) = rho;
 		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::x1Momentum_index) = rho * vx;
 		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::x2Momentum_index) = rho * vy;
 		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::x3Momentum_index) = rho * vz;
-		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::energy_index) = Eint + 0.5 * rho * vsq;
+		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::energy_index) = Eint + 0.5 * rho * vsq + Emag;
 		state_cc(i, j, k, HydroSystem<AgoraGalaxy>::internalEnergy_index) = Eint;
 	});
 }
