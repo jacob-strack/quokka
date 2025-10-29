@@ -316,7 +316,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 
 	void particleMeshInteraction(amrex::Real time, amrex::Real dt);
 
-	void particleMeshInteraction_fc(amrex::Real time, amrex::Real dt, quokka::direction dir); 
+	void particleMeshInteraction_fc(amrex::Real time, amrex::Real dt); 
 
 	// boundary condition
 	AMREX_GPU_DEVICE static void setCustomBoundaryConditions(const amrex::IntVect &iv, amrex::Array4<amrex::Real> const &dest, int dcomp, int numcomp,
@@ -1206,7 +1206,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 				// TODO(cch): Need to take care of AMR subcycling
 				particleMeshInteraction(cur_time, dt_[0]);
 				for(int idim = 0; idim < AMREX_SPACEDIM; idim++)
-					particleMeshInteraction_fc(cur_time, dt_[0], static_cast<quokka::direction>(idim)); 
+					particleMeshInteraction_fc(cur_time, dt_[0]); 
 			}
 
 			// Use the new type-aware particle destruction method
@@ -1595,7 +1595,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 	}
 }
 
-template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInteraction_fc(amrex::Real time, amrex::Real dt, quokka::direction dir)
+template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInteraction_fc(amrex::Real time, amrex::Real dt)
 {
 	//leave if no mhd or no magnetic feedback 
 	if constexpr (!Physics_Traits<problem_t>::is_mhd_enabled || !Physics_Traits<problem_t>::SN_magnetic_feedback_enabled)
@@ -1604,7 +1604,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
         //zero magnetic field for testing
 	//state_new_fc_[lev][static_cast<int>(dir)].setVal(0.); 	
 	//deposit magnetic feedback 
-	particleRegister_.depositSN_fc(state_new_fc_[lev][static_cast<int>(dir)], lev, dir, time, dt, 262*3.086e18, 0.2*3.154e13); 
+	particleRegister_.depositSN_fc(state_new_cc_[lev],state_new_fc_[lev], lev, time, dt, 262*3.086e18, 0.2*3.154e13); 
 }
 #endif // AMREX_SPACEDIM == 3
 
