@@ -785,6 +785,9 @@ void SNDeposition_fc(ContainerType *container, amrex::MultiFab &state, amrex::Ar
 
 	//make sure buffer is zeroed out 
 	state_buffer.setVal(0); 
+	state_buffer_fc[0].setVal(0); 
+	state_buffer_fc[1].setVal(0); 
+	state_buffer_fc[2].setVal(0); 
 
 	//Fill buffer from particles 
 	SNFeedbackUtils::depositToBuffer_fc<ContainerType, problem_t>(container, state_buffer, state_buffer_fc, lev, time, dt, evolutionStageIndex, birthTimeIndex, L, tau);
