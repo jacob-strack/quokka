@@ -153,7 +153,7 @@ void depositMagneticSeedField(amrex::Array4<amrex::Real> const &local_buffer, am
 			for(int ii = -SN_stencil_size; ii <= SN_stencil_size; ++ii){
 				//get the correct vector potential for the current time and position
 				//and take the curl
-			    auto Bx = [=](double xL, double yL, double zL) {return (A_z(xL, yL + dx[1], zL, time_active, L, tau, timestep) - A_z(xL, yL - dx[1], zL, time_active, L, tau, timestep)) / (2*dx[1]);};
+			    	auto Bx = [=](double xL, double yL, double zL) {return (A_z(xL, yL + dx[1], zL, time_active, L, tau, timestep) - A_z(xL, yL - dx[1], zL, time_active, L, tau, timestep)) / (2*dx[1]);};
 				auto By = [=](double xL, double yL, double zL) {return (A_z(xL - dx[0], yL, zL, time_active, L, tau, timestep) - A_z(xL + dx[0], yL,zL, time_active, L, tau, timestep)) / (2*dx[0]);};		
 				const double this_xL = prob_lo[0] + (ix + ii) * dx[0] - pos_x; 
 				const double this_yL = prob_lo[1] + (iy + jj) * dx[1] - pos_y; 
@@ -161,15 +161,16 @@ void depositMagneticSeedField(amrex::Array4<amrex::Real> const &local_buffer, am
 				const double bx = Bx(this_xL, this_yL, this_zL); 
 				const double by = By(this_xL, this_yL, this_zL);
 				//apply random rotation using Euler angles
-			    const double bx_p = cos(Euler_alpha) * cos(Euler_beta) * bx + (cos(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) - sin(Euler_alpha)*cos(Euler_gamma))*by; 
+			    	const double bx_p = cos(Euler_alpha) * cos(Euler_beta) * bx + (cos(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) - sin(Euler_alpha)*cos(Euler_gamma))*by; 
 				const double by_p = sin(Euler_alpha) * cos(Euler_beta) * bx + (sin(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) + cos(Euler_alpha)*cos(Euler_gamma))*by; 
 				const double bz_p = -1*sin(Euler_beta)*bx + cos(Euler_beta)*sin(Euler_gamma)*by; 
-                amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[0](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bx_p);
-                amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[1](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), by_p);
-                amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[2](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bz_p);
-                //deposit appropriate amount of magnetic energy
-                std::cout << "after curl " << bx_p << " " << by_p << " " << bz_p << std::endl;
-                amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, HydroSystem<problem_t>::energy_index), (bx_p*bx_p + by_p*by_p + bz_p*bz_p) / 2);
+				if(bx_p != 0.0 || by_p != 0.0 || bz_p != 0.0)
+					std::cout << bx_p << " " << by_p << " " << bz_p << std::endl;
+                		amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[0](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bx_p);
+                		amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[1](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), by_p);
+                		amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[2](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bz_p);
+                		//deposit appropriate amount of magnetic energy
+                		amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, HydroSystem<problem_t>::energy_index), (bx_p*bx_p + by_p*by_p + bz_p*bz_p) / 2);
 			}
 		}	
 	}
@@ -452,8 +453,8 @@ void depositToBuffer_fc(ContainerType *container, amrex::MultiFab &state_buffer,
 				p.rdata(p.NReal - 1) = Euler_gamma;
 				
 			}
-            if(step_end_time > sp_deathtime)
-                std::cout << "calling depositMagneticSeedField" << std::endl;
+            		if(step_end_time > sp_deathtime)
+                		std::cout << "calling depositMagneticSeedField" << std::endl;
 			if(step_end_time > sp_deathtime)
 				depositMagneticSeedField<problem_t>(local_buffer,local_buffer_fc, ix, iy, iz, L, tau, dt, vol_inverse, sp_deathtime, step_end_time, ppos_x, ppos_y, ppos_z, 0*p.rdata(p.NReal - 3), 0*p.rdata(p.NReal - 2), 0*p.rdata(p.NReal - 1), stencil_weights_gpu, plo, dx);
 			});
@@ -684,6 +685,7 @@ template <typename problem_t>
 void addBufferToState_fc(amrex::MultiFab &state, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> &state_fc, amrex::MultiFab &state_buffer, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> &state_buffer_fc)
 {
 	const BL_PROFILE("SNFeedbackUtils::addBufferToState_fc"); 
+	std::cout << "Adding buffer to state" << std::endl;
 	for (amrex::MFIter mfi(state_fc[0]); mfi.isValid(); ++mfi) {
 		const amrex::Box &box = mfi.validbox();
         const amrex::Array<amrex::Array4<amrex::Real>, AMREX_SPACEDIM> &local_state_fc = {state_fc[0].array(mfi), state_fc[1].array(mfi), state_fc[2].array(mfi)};
@@ -785,6 +787,9 @@ void SNDeposition_fc(ContainerType *container, amrex::MultiFab &state, amrex::Ar
 
 	//make sure buffer is zeroed out 
 	state_buffer.setVal(0); 
+	state_buffer_fc[0].setVal(0);
+	state_buffer_fc[1].setVal(0);
+	state_buffer_fc[2].setVal(0);
 
 	//Fill buffer from particles 
 	SNFeedbackUtils::depositToBuffer_fc<ContainerType, problem_t>(container, state_buffer, state_buffer_fc, lev, time, dt, evolutionStageIndex, birthTimeIndex, L, tau);
