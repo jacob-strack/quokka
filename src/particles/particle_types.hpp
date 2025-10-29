@@ -121,7 +121,7 @@ enum CICParticleDataIdx {
 };
 
 // Number of real components for CIC_particles, mass + 3 velocity components + 3 Euler angles for random orientation of magnetic SN feedback
-constexpr int CICParticleRealComps = 4 + 3;
+constexpr int CICParticleRealComps = 4;
 
 // Type definitions for CIC_particles container and iterator
 using CICParticleContainer = amrex::AmrParticleContainer<CICParticleRealComps>;
@@ -144,9 +144,9 @@ enum CICRadParticleDataIdx {
 template <typename problem_t>
 constexpr int CICRadParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 6 + Physics_Traits<problem_t>::nGroups + 3; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups], Euler
+		return 6 + Physics_Traits<problem_t>::nGroups; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups], Euler
 	} else {
-		return 6 + 3; // mass, vx, vy, vz, birth_time, death_time, Euler
+		return 6; // mass, vx, vy, vz, birth_time, death_time, Euler
 	}
 }();
 
@@ -219,9 +219,9 @@ constexpr int TestParticleStageIdx = 0; // Evolution stage of the particle, inde
 template <typename problem_t>
 constexpr int TestParticleRealComps = []() constexpr {
 	if constexpr (Physics_Traits<problem_t>::is_hydro_enabled || Physics_Traits<problem_t>::is_radiation_enabled) {
-		return 6 + Physics_Traits<problem_t>::nGroups + 3; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
+		return 6 + Physics_Traits<problem_t>::nGroups; // mass, vx, vy, vz, birth_time, death_time, lum[nGroups]
 	} else {
-		return 6 + 3; // mass, vx, vy, vz, birth_time, death_time
+		return 6; // mass, vx, vy, vz, birth_time, death_time
 	}
 }();
 

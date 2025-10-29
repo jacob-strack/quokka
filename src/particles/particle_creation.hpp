@@ -394,7 +394,6 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 				amrex::Real const num_high_mass_stars_exp = m_high_tot / m_star_high_avg;
 				num_star = static_cast<int>(1 + (amrex::RandomPoisson(num_high_mass_stars_exp, engine)));
 			}
-			std::cout << "num new: " << num_star << std::endl;
 			return num_star;
 		}
 	};

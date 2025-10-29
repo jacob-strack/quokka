@@ -137,7 +137,7 @@ class PhysicsParticleDescriptorBase
 	{
 		return 0.0_rt;
 	}
-	virtual void depositSN_fc(amrex::MultiFab & /*state*/, amrex::MultiFab & /*state_buffer*/, int /*lev*/, quokka::direction /*dir*/, amrex::Real /*time*/, amrex::Real /*dt*/, const double /*L*/, const double /*tar*/)
+	virtual void depositSN_fc(amrex::MultiFab & /*state*/, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> & /*state_fc*/, amrex::MultiFab & /*state_buffer*/, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> &  /*state_buffer_fc*/, int /*lev*/, amrex::Real /*time*/, amrex::Real /*dt*/, const double /*L*/, const double /*tar*/)
 	{ /* Default empty implementation */}
 
 	virtual void computeSinkAccretion(amrex::MultiFab &state, amrex::MultiFab &state_accretion_rate, int lev, amrex::Real time, amrex::Real dt)
@@ -572,13 +572,13 @@ class StarParticleDescriptor : public PhysicsParticleDescriptor<ContainerType, p
 
 	// Implementation of magnetic supernova feedback
 	
-	void depositSN_fc(amrex::MultiFab &state, amrex::MultiFab &state_buffer, int lev, quokka::direction dir, amrex::Real time, amrex::Real dt, const double L, const double tau) override 
+	void depositSN_fc(amrex::MultiFab &state,amrex::Array<amrex::MultiFab,AMREX_SPACEDIM> &state_fc, amrex::MultiFab &state_buffer,amrex::Array<amrex::MultiFab, AMREX_SPACEDIM>  &state_buffer_fc, int lev,  amrex::Real time, amrex::Real dt, const double L, const double tau) override 
 	{
 		if(this->container_ != nullptr && this->getEvolutionStageIndex() >= 0){ //might be able to change the evolution stage index to something bigger 
 			if(!quokka::disable_SN_feedback){
 				//yell if not cgs 
 				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(Physics_Traits<problem_t>::unit_system == UnitSystem::CGS, "Use CGS Units"); 
-				SNDeposition_fc<ContainerType, problem_t>(this->container_, state, state_buffer, lev, dir, time, dt, this->getEvolutionStageIndex(), this->getBirthTimeIndex(), L, tau); 
+				SNDeposition_fc<ContainerType, problem_t>(this->container_, state, state_fc, state_buffer, state_buffer_fc, lev, time, dt, this->getEvolutionStageIndex(), this->getBirthTimeIndex(), L, tau); 
 			}
 		}
 	}
@@ -773,13 +773,18 @@ template <typename problem_t> class PhysicsParticleRegister
 
 	// Deposit supernova seed fields from recent deadees 
 	
-	void depositSN_fc(amrex::MultiFab &state, int lev, quokka::direction dir, amrex::Real time, amrex::Real dt, const double L, const double tau)
+	void depositSN_fc(amrex::MultiFab &state,amrex::Array<amrex::MultiFab,AMREX_SPACEDIM> &state_fc, int lev, amrex::Real time, amrex::Real dt, const double L, const double tau)
 	{
 		const BL_PROFILE("PhysicsParticleRegister::depositSN_fc()"); 
 		amrex::MultiFab state_buffer(state.boxArray(), state.DistributionMap(), state.nComp(), state.nGrow());
-		for (const auto &[type, descriptor] : particleRegistry_) {
+        amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> state_buffer_fc; 
+        state_buffer_fc[0].define(state_fc[0].boxArray(), state_fc[0].DistributionMap(), state_fc[0].nComp(), state_fc[0].nGrow()); 
+        state_buffer_fc[1].define(state_fc[1].boxArray(), state_fc[1].DistributionMap(), state_fc[1].nComp(), state_fc[1].nGrow()); 
+        state_buffer_fc[2].define(state_fc[2].boxArray(), state_fc[2].DistributionMap(), state_fc[2].nComp(), state_fc[2].nGrow()); 
+        
+        for (const auto &[type, descriptor] : particleRegistry_) {
 			if(descriptor->isStarParticle()){
-				descriptor->depositSN_fc(state, state_buffer, lev, dir, time, dt, L, tau);
+				descriptor->depositSN_fc(state,state_fc, state_buffer,state_buffer_fc, lev, time, dt, L, tau);
 			}
 		}	
 	}
