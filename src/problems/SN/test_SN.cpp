@@ -44,7 +44,7 @@ static double t_stop = 3.0e5; // stop time (yr) // NOLINT
 
 template <> struct Particle_Traits<SNProblem> {
 	// static constexpr ParticleSwitch particle_switch = ParticleSwitch::None;
-	static constexpr ParticleSwitch particle_switch = ParticleSwitch::Test;
+	static constexpr ParticleSwitch particle_switch = ParticleSwitch::StochasticStellarPop;
 };
 
 template <> struct quokka::EOS_Traits<SNProblem> {
@@ -84,6 +84,40 @@ template <> void QuokkaSimulation<SNProblem>::createInitialTestParticles()
 		for (auto &kv : particles) {
 			auto &particle_array = kv.second.GetArrayOfStructs();
 			const int np = particle_array.numParticles();
+			auto *pdata = particle_array().data();
+
+			// Launch GPU kernel to set integer components
+			amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE(int i) {
+				auto &p = pdata[i]; // NOLINT
+				p.idata(0) = static_cast<int>(quokka::StellarEvolutionStage::SNProgenitor);
+			});
+		}
+	}
+
+	// Ensure GPU operations are complete
+	amrex::Gpu::streamSynchronize();
+}
+
+template <> void QuokkaSimulation<SNProblem>::createInitialStochasticStellarPopParticles()
+{
+	// Read particles from ASCII file. Note that this only read real components and not integer components, therefore we need to use
+	// InitSetPhyParticles to set the integer components
+	const int nreal_extra = 10; // mass vx vy vz birth_time death_time lum alpha_euler beta_euler gamma_euler
+	StochasticStellarPopParticles->SetVerbose(1);
+	StochasticStellarPopParticles->InitFromAsciiFile(SN_particles_file, nreal_extra, nullptr);
+
+	// Using a for loop from lev = 0 to StochasticStellarPopParticles->maxLevel() won't work because not all levels necessarily have particles, and when
+	// some levels do not have particles, StochasticStellarPopParticles->GetParticles(lev) will result in a Segfault. Therefore, we loop over the actual
+	// particle container.
+	for (auto &kv : StochasticStellarPopParticles->GetParticles()) {
+		for (auto &ikv : kv) {
+			auto &particle_array = ikv.second.GetArrayOfStructs();
+			const int np = particle_array.numParticles();
+
+			if (np == 0) {
+				continue;
+			}
+
 			auto *pdata = particle_array().data();
 
 			// Launch GPU kernel to set integer components
