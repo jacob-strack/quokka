@@ -969,7 +969,8 @@ template <typename problem_t> void QuokkaSimulation<problem_t>::advanceSingleTim
 			fr_as_crse->reset();
 			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
 				emf_as_crse = emf_reg_[lev + 1].get();
-				emf_as_crse->reset();
+				if(emf_as_crse != nullptr)
+					emf_as_crse->reset();
 			}
 		}
 		if (lev > 0) {
