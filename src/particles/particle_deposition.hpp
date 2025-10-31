@@ -13,8 +13,42 @@
 #include "AMReX_REAL.H"
 #include "hydro/hydro_system.hpp"
 #include "particles/particle_types.hpp"
+#include "particles/particle_utils.hpp"
 #include "grid.hpp"
 #include "boost/math/special_functions/gamma.hpp"
+namespace amrex::ParticleInterpolator
+{
+/** \brief A class that implements nearest-eight-cell interpolation.
+ */
+struct NearestEight : public Base<NearestEight, amrex::Real> {
+	static constexpr int stencil_width = 2;
+
+	static constexpr int nx = (AMREX_SPACEDIM >= 1) ? stencil_width - 1 : 0; // NOLINT
+	static constexpr int ny = (AMREX_SPACEDIM >= 2) ? stencil_width - 1 : 0; // NOLINT
+	static constexpr int nz = (AMREX_SPACEDIM >= 3) ? stencil_width - 1 : 0; // NOLINT
+
+	amrex::Real weights[3 * stencil_width]; // NOLINT
+
+	template <typename P>
+	AMREX_GPU_DEVICE AMREX_FORCE_INLINE NearestEight(const P &p, amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &plo, // NOLINT
+							 amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &dxi)
+	{
+		w = &weights[0]; // NOLINT
+		for (int i = 0; i < AMREX_SPACEDIM; ++i) {
+			amrex::Real l = (p.pos(i) - plo[i]) * dxi[i] + 0.5;
+			index[i] = static_cast<int>(amrex::Math::floor(l)) - 1;
+			w[stencil_width * i + 0] = 1.;
+			w[stencil_width * i + 1] = 1.;
+		}
+		for (int i = AMREX_SPACEDIM; i < 3; ++i) {
+			index[i] = 0;
+			w[stencil_width * i + 0] = 1.;
+			w[stencil_width * i + 1] = 0.;
+		}
+	}
+};
+} // namespace amrex::ParticleInterpolator
+
 namespace quokka
 {
 
@@ -41,6 +75,8 @@ struct RadDeposition {
 							    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &dxi) const noexcept
 	{
 		amrex::ParticleInterpolator::Linear interp(p, plo, dxi);
+		const auto currentTime = current_time;
+		const auto birthIndex = birthTimeIndex;
 		// Deposit radiation energy only if particle is active
 		interp.ParticleToMesh(p, radEnergySource, start_part_comp, start_mesh_comp, num_comp,
 				      [=] AMREX_GPU_DEVICE(const ContainerType &part, int comp) {
@@ -70,10 +106,30 @@ struct MassDeposition {
 							    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &dxi) const noexcept
 	{
 		amrex::ParticleInterpolator::Linear interp(p, plo, dxi);
+		const amrex::Real gConstLocal = Gconst;
+		const amrex::Real cellVolumeFactor = (AMREX_D_TERM(dxi[0], *dxi[1], *dxi[2]));
 		// Deposit mass weighted by 4 pi G
 		interp.ParticleToMesh(p, rho, start_part_comp, start_mesh_comp, num_comp, [=] AMREX_GPU_DEVICE(const ContainerType &part, int comp) {
-			return 4.0 * M_PI * Gconst * part.rdata(comp) * (AMREX_D_TERM(dxi[0], *dxi[1], *dxi[2]));
+			return 4.0 * M_PI * gConstLocal * part.rdata(comp) * cellVolumeFactor;
 		});
+	}
+};
+
+struct DepositionCount {
+	int start_part_comp{}; // Starting component in particle data
+	int start_mesh_comp{}; // Starting component in mesh data
+	int num_comp{};	       // Number of components to deposit
+
+	// Operator to perform mass deposition using linear interpolation
+	template <typename ContainerType>
+	AMREX_GPU_DEVICE AMREX_FORCE_INLINE void operator()(const ContainerType &p, amrex::Array4<amrex::Real> const &rho_count,
+							    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &plo,
+							    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &dxi) const noexcept
+	{
+		amrex::ParticleInterpolator::NearestEight interp(p, plo, dxi);
+		// Deposit to 1.0 to all eight cells that the particle interacts with
+		interp.ParticleToMesh(p, rho_count, start_part_comp, start_mesh_comp, num_comp,
+				      [=] AMREX_GPU_DEVICE(const ContainerType & /*part*/, int /*comp*/) { return 1.0; });
 	}
 };
 
@@ -111,6 +167,9 @@ depositThermalSNR(amrex::Array4<amrex::Real> const &local_buffer, const int ix, 
 							     SNR_pz_per_cell);
 				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, HydroSystem<problem_t>::energy_index),
 							     SNR_energy_per_cell);
+				// Deposit count into the last component for roundoff algorithm
+				const int count_comp = Physics_NumVars::numHydroVars; // Last component is the count
+				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, count_comp), 1.0);
 			}
 		}
 	}
@@ -164,11 +223,13 @@ void depositMagneticSeedField(amrex::Array4<amrex::Real> const &local_buffer, am
 			    const double bx_p = cos(Euler_alpha) * cos(Euler_beta) * bx + (cos(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) - sin(Euler_alpha)*cos(Euler_gamma))*by; 
 				const double by_p = sin(Euler_alpha) * cos(Euler_beta) * bx + (sin(Euler_alpha)*sin(Euler_beta)*sin(Euler_gamma) + cos(Euler_alpha)*cos(Euler_gamma))*by; 
 				const double bz_p = -1*sin(Euler_beta)*bx + cos(Euler_beta)*sin(Euler_gamma)*by; 
+		if(std::isnan(bx_p) || std::isnan(by_p) || std::isnan(bz_p)) 
+			std::cout << "nan in b field " << bx_p << " " << by_p << " " << bz_p << std:: endl;
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[0](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bx_p);
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[1](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), by_p);
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[2](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bz_p);
                 //deposit appropriate amount of magnetic energy
-                std::cout << "after curl " << bx_p << " " << by_p << " " << bz_p << std::endl;
+                std::cout << "after curl " << Euler_alpha << " " << Euler_beta << " " << Euler_gamma << std::endl;
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, HydroSystem<problem_t>::energy_index), (bx_p*bx_p + by_p*by_p + bz_p*bz_p) / 2);
 			}
 		}	
@@ -260,6 +321,9 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE void depositThermalKineticMomentumSNR(
 				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ii, jj, kk, HydroSystem<problem_t>::x2Momentum_index), dpy);
 				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ii, jj, kk, HydroSystem<problem_t>::x3Momentum_index), dpz);
 				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ii, jj, kk, HydroSystem<problem_t>::energy_index), e_snr_per_cell);
+				// Deposit count into the last component for roundoff algorithm
+				const int count_comp = Physics_NumVars::numHydroVars; // Last component is the count
+				amrex::Gpu::Atomic::AddNoRet(&local_buffer(ii, jj, kk, count_comp), 1.0);
 			}
 		}
 	}
@@ -455,7 +519,7 @@ void depositToBuffer_fc(ContainerType *container, amrex::MultiFab &state_buffer,
             if(step_end_time > sp_deathtime)
                 std::cout << "calling depositMagneticSeedField" << std::endl;
 			if(step_end_time > sp_deathtime)
-				depositMagneticSeedField<problem_t>(local_buffer,local_buffer_fc, ix, iy, iz, L, tau, dt, vol_inverse, sp_deathtime, step_end_time, ppos_x, ppos_y, ppos_z, 0*p.rdata(p.NReal - 3), 0*p.rdata(p.NReal - 2), 0*p.rdata(p.NReal - 1), stencil_weights_gpu, plo, dx);
+				depositMagneticSeedField<problem_t>(local_buffer,local_buffer_fc, ix, iy, iz, L, tau, dt, vol_inverse, sp_deathtime, step_end_time, ppos_x, ppos_y, ppos_z, p.rdata(p.NReal - 3), p.rdata(p.NReal - 2), p.rdata(p.NReal - 1), stencil_weights_gpu, plo, dx);
 			});
 	}
 	
@@ -741,14 +805,15 @@ void updateEvolutionStage(ContainerType *container, int lev_min, amrex::Real ste
 } // namespace SNFeedbackUtils
 
 template <typename ContainerType, typename problem_t>
-auto SNDeposition(ContainerType *container, amrex::MultiFab &state, amrex::MultiFab &state_buffer, int lev, amrex::Real time, amrex::Real dt, int mass_index,
-		  int evolutionStageIndex, int birthTimeIndex) -> Real
+auto SNDeposition(ContainerType *container, amrex::MultiFab &state, int lev, amrex::Real time, amrex::Real dt, int mass_index, int evolutionStageIndex,
+		  int birthTimeIndex) -> Real
 {
 	const BL_PROFILE("[particle_deposition] SNDeposition()");
 	static_assert(SN_stencil_size <= 3,
 		      "SN_stencil_size must be <= 3"); // SN_stencil_size must be <= n_ghost - 1 = 3. SN particle may drift 1 cell before being deposited.
 
 	// Zero the buffer for each particle type
+	amrex::MultiFab state_buffer(state.boxArray(), state.DistributionMap(), state.nComp() + 1, state.nGrow());
 	state_buffer.setVal(0.0);
 
 	// copy host variables to device
@@ -765,6 +830,8 @@ auto SNDeposition(ContainerType *container, amrex::MultiFab &state, amrex::Multi
 	// Step 2: Sum boundary values
 	state_buffer.SumBoundary(container->Geom(lev).periodicity());
 
+	// Apply roundoff to state_buffer
+	ParticleUtils::roundoffMultiFab(state_buffer);
 	// Step 3: Add the buffer to the state
 	SNFeedbackUtils::addBufferToState<problem_t>(state, state_buffer, SN_scheme_d, p_max_velocity);
 
@@ -784,10 +851,10 @@ void SNDeposition_fc(ContainerType *container, amrex::MultiFab &state, amrex::Ar
 	static_assert(SN_stencil_size <=3, "SN_stencil size must be >= 3"); 
 
 	//make sure buffer is zeroed out 
-	state_buffer.setVal(0); 
-	state_buffer_fc[0].setVal(0); 
-	state_buffer_fc[1].setVal(0); 
-	state_buffer_fc[2].setVal(0); 
+	state_buffer.setVal(0.0); 
+	state_buffer_fc[0].setVal(0.0); 
+	state_buffer_fc[1].setVal(0.0); 
+	state_buffer_fc[2].setVal(0.0); 
 
 	//Fill buffer from particles 
 	SNFeedbackUtils::depositToBuffer_fc<ContainerType, problem_t>(container, state_buffer, state_buffer_fc, lev, time, dt, evolutionStageIndex, birthTimeIndex, L, tau);

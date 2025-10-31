@@ -26,6 +26,7 @@
 #include "particle_radiation.hpp"
 #include "particle_types.hpp"
 #include "physics_info.hpp"
+#include "particle_update.hpp"
 
 namespace quokka
 {
@@ -48,9 +49,10 @@ class PhysicsParticleDescriptorBase
 	bool forceFinestLevel_{false}; // Whether particles are forced to live in the finest level
 
       public:
-	PhysicsParticleDescriptorBase(int mass_idx, int lum_idx, int birth_time_idx, bool allows_creation, bool allows_destruction = false)
+	PhysicsParticleDescriptorBase(int mass_idx, int lum_idx, int birth_time_idx, bool allows_creation, bool allows_destruction = false,
+				      int evolution_stage_idx = -1, bool allows_accretion = false)
 	    : massIndex_(mass_idx), lumIndex_(lum_idx), birthTimeIndex_(birth_time_idx), allowsCreation_(allows_creation),
-	      allowsDestruction_(allows_destruction)
+	      allowsDestruction_(allows_destruction), evolutionStageIndex_(evolution_stage_idx), allowsAccretion_(allows_accretion)
 	{
 	}
 
@@ -85,7 +87,6 @@ class PhysicsParticleDescriptorBase
 	[[nodiscard]] virtual auto getParticleDataAtLevel(int lev) const -> std::pair<std::vector<std::vector<double>>, std::vector<std::vector<int>>> = 0;
 
 	// Pure virtual methods that must be implemented by derived classes
-	[[nodiscard]] virtual auto isStarParticle() -> bool = 0;
 	virtual void depositRadiation(amrex::MultiFab &radEnergySource, int lev, amrex::Real current_time, int nGroups) = 0;
 
 	// Redistribute particles at level lev and above
@@ -132,11 +133,7 @@ class PhysicsParticleDescriptorBase
 
 	//----- Methods that are implemented for some but not all particle types, so they cannot be pure virtual -----
 
-	virtual auto depositSN(amrex::MultiFab & /*state*/, amrex::MultiFab & /*state_buffer*/, int /*lev*/, amrex::Real /*time*/, amrex::Real /*dt*/)
-	    -> amrex::Real
-	{
-		return 0.0_rt;
-	}
+	virtual auto depositSN(amrex::MultiFab & /*state*/, int /*lev*/, amrex::Real /*time*/, amrex::Real /*dt*/) -> amrex::Real { return 0.0_rt; }
 	virtual void depositSN_fc(amrex::MultiFab & /*state*/, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> & /*state_fc*/, amrex::MultiFab & /*state_buffer*/, amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> &  /*state_buffer_fc*/, int /*lev*/, amrex::Real /*time*/, amrex::Real /*dt*/, const double /*L*/, const double /*tar*/)
 	{ /* Default empty implementation */}
 
@@ -169,15 +166,14 @@ template <typename ContainerType, typename problem_t, ParticleType particleType>
 	ContainerType *container_{}; // Pointer to the actual particle container - moved to protected
 
       public:
-	[[nodiscard]] auto isStarParticle() -> bool override { return false; }
-
 	// Get the particle type
 	[[nodiscard]] static constexpr auto getParticleType() -> ParticleType { return particleType_; }
 
 	// Constructor initializing descriptor with container and particle properties
 	PhysicsParticleDescriptor(ContainerType *container, int mass_idx, int lum_idx, int birth_time_idx, bool allows_creation,
-				  bool allows_destruction = false)
-	    : PhysicsParticleDescriptorBase(mass_idx, lum_idx, birth_time_idx, allows_creation, allows_destruction), container_(container)
+				  bool allows_destruction = false, int evolution_stage_idx = -1, bool allows_accretion = false)
+	    : PhysicsParticleDescriptorBase(mass_idx, lum_idx, birth_time_idx, allows_creation, allows_destruction, evolution_stage_idx, allows_accretion),
+	      container_(container)
 	{
 	}
 
@@ -220,6 +216,9 @@ template <typename ContainerType, typename problem_t, ParticleType particleType>
 			// zero_out_input is false because we want to accumulate mass
 			// vol_weight is false because MassDeposition does the volume weighting
 			amrex::ParticleToMesh(*container_, rhs, 0, finest_lev, MassDeposition{Gconst, this->getMassIndex(), 0, 1}, false, false);
+			// Deposit count into the last component of rhs
+			const int count_comp = 1; // Second component is the count
+			amrex::ParticleToMesh(*container_, rhs, 0, finest_lev, DepositionCount{this->getMassIndex(), count_comp, 1}, false, false);
 		}
 	}
 
@@ -502,51 +501,40 @@ template <typename ContainerType, typename problem_t, ParticleType particleType>
 			});
 		}
 	}
-#endif
-};
-
-// New class for star particles that adds stellar evolution capabilities
-template <typename ContainerType, typename problem_t, ParticleType particleType>
-class StarParticleDescriptor : public PhysicsParticleDescriptor<ContainerType, problem_t, particleType>
-{
-      public:
-	[[nodiscard]] auto isStarParticle() -> bool override { return true; }
-
-	// Constructor - forwards all arguments to the base class
-	StarParticleDescriptor(ContainerType *container, int mass_idx, int lum_idx, int birth_time_idx, bool allows_creation, bool allows_destruction = false,
-			       int evolution_stage_idx = -1, bool allows_accretion = false)
-	    : PhysicsParticleDescriptor<ContainerType, problem_t, particleType>(container, mass_idx, lum_idx, birth_time_idx, allows_creation,
-										allows_destruction)
-	{
-		this->setEvolutionStageIndex(evolution_stage_idx);
-		this->setAllowsAccretion(allows_accretion);
-	}
-
-
-#if AMREX_SPACEDIM == 3
 	// Override updateParticleProperties for star particles
 	void updateParticleProperties(amrex::Real current_time) override
 	{
 		// Use the traits system to update particle properties directly
 		if (this->container_ != nullptr) {
-			// Apply the updater to all particles across all levels
-			for (int lev = 0; lev <= this->container_->finestLevel(); ++lev) {
-				for (typename ContainerType::ParIterType pIter(*this->container_, lev); pIter.isValid(); ++pIter) {
-					auto &particles = pIter.GetArrayOfStructs();
-					auto *pData = particles().data();
-					const amrex::Long np = pIter.numParticles();
+			// Get the GPU tables by value (host-side access)
+			constexpr int nGroups = Physics_Traits<problem_t>::nGroups;
+			auto *host_tables_ptr = quokka::g_luminosity_tables_ptr<nGroups>;
 
-					amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE(int64_t idx) {
-						auto &p = pData[idx]; // NOLINT
-						ParticlePropertyUpdateTraits<particleType>::template updateProperties<problem_t>(p, current_time);
-					});
+			// Only proceed if tables are initialized
+			if (host_tables_ptr != nullptr && host_tables_ptr->is_initialized()) {
+				// Create GPU const tables by value to pass to device
+				auto const gpu_tables = host_tables_ptr->const_tables();
+
+				// Apply the updater to all particles across all levels
+				for (int lev = 0; lev <= this->container_->finestLevel(); ++lev) {
+					for (typename ContainerType::ParIterType pIter(*this->container_, lev); pIter.isValid(); ++pIter) {
+						auto &particles = pIter.GetArrayOfStructs();
+						auto *pData = particles().data();
+						const amrex::Long np = pIter.numParticles();
+
+						amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE(int64_t idx) {
+							auto &p = pData[idx]; // NOLINT
+							ParticlePropertyUpdateTraits<particleType>::template updateProperties<
+							    problem_t, typename ContainerType::ParticleType, nGroups>(p, current_time, gpu_tables);
+						});
+					}
 				}
 			}
 		}
 	}
 
 	// Implementation of supernova energy and momentum deposition from particles to grid
-	auto depositSN(amrex::MultiFab &state, amrex::MultiFab &state_buffer, int lev, amrex::Real time, amrex::Real dt) -> amrex::Real override
+	auto depositSN(amrex::MultiFab &state, int lev, amrex::Real time, amrex::Real dt) -> amrex::Real override
 	{
 		amrex::Real max_velocity = 0.0;
 
@@ -558,7 +546,7 @@ class StarParticleDescriptor : public PhysicsParticleDescriptor<ContainerType, p
 
 				// Deposit supernova energy and momentum from all particles. This also updates the evolution stage of the particles.
 				max_velocity =
-				    SNDeposition<ContainerType, problem_t>(this->container_, state, state_buffer, lev, time, dt, this->getMassIndex(),
+				    SNDeposition<ContainerType, problem_t>(this->container_, state, lev, time, dt, this->getMassIndex(),
 									   this->getEvolutionStageIndex(), this->getBirthTimeIndex());
 			} else {
 				// Only update evolution stage but not deposit energy/momentum
@@ -633,12 +621,14 @@ template <typename problem_t> class PhysicsParticleRegister
 		return false;
 	}
 
-	// Check if registry contains any star particles
-	[[nodiscard]] auto HasStarParticles() const -> bool
+	// Check if registry contains any radiating particles
+	[[nodiscard]] auto HasRadiatingParticles() const -> bool
 	{
-		for (const auto &[name, descriptor] : particleRegistry_) {
-			if (descriptor->isStarParticle()) {
-				return true;
+		if (Physics_Traits<problem_t>::is_radiation_enabled) {
+			for (const auto &[name, descriptor] : particleRegistry_) { // NOSONAR
+				if (descriptor->getLumIndex() >= 0) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -684,42 +674,24 @@ template <typename problem_t> class PhysicsParticleRegister
 		} else if (type == ParticleType::CICRad) {
 			descriptor = std::make_unique<PhysicsParticleDescriptor<ContainerType, problem_t, ParticleType::CICRad>>(
 			    container, CICRadParticleMassIdx, CICRadParticleLumIdx, CICRadParticleBirthTimeIdx, false, false);
-		}
-#endif // AMREX_SPACEDIM == 3
-		else {
-			amrex::Abort("Unknown particle type for physics particles");
-		}
-
-		particleRegistry_[type] = std::move(descriptor);
-	}
-
-#if AMREX_SPACEDIM == 3
-	// Register a new star particle type with specified properties
-	// Star particles have additional stellar evolution capabilities including supernova feedback
-	template <typename ContainerType> void registerStarParticleType(ContainerType *container, ParticleType type)
-	{
-		std::unique_ptr<PhysicsParticleDescriptorBase> descriptor;
-
-		// Create the appropriate star particle descriptor based on the particle type
-		// The parameters for the descriptor are: mass_idx, lum_idx, birth_time_idx, allows_creation, allows_destruction, evolution_stage_idx,
-		// allows_accretion
-		if (type == ParticleType::StochasticStellarPop) {
-			descriptor = std::make_unique<StarParticleDescriptor<ContainerType, problem_t, ParticleType::StochasticStellarPop>>(
+		} else if (type == ParticleType::StochasticStellarPop) {
+			descriptor = std::make_unique<PhysicsParticleDescriptor<ContainerType, problem_t, ParticleType::StochasticStellarPop>>(
 			    container, StochasticStellarPopParticleMassIdx, StochasticStellarPopParticleLumIdx, StochasticStellarPopParticleBirthTimeIdx, true,
 			    false, StochasticStellarPopParticleStageIdx, false);
 		} else if (type == ParticleType::Sink) {
-			descriptor = std::make_unique<StarParticleDescriptor<ContainerType, problem_t, ParticleType::Sink>>(container, SinkParticleMassIdx, -1,
+			descriptor = std::make_unique<PhysicsParticleDescriptor<ContainerType, problem_t, ParticleType::Sink>>(container, SinkParticleMassIdx, -1,
 															    -1, true, false, -1, true);
 		} else if (type == ParticleType::Test) {
-			descriptor = std::make_unique<StarParticleDescriptor<ContainerType, problem_t, ParticleType::Test>>(
+			descriptor = std::make_unique<PhysicsParticleDescriptor<ContainerType, problem_t, ParticleType::Test>>(
 			    container, TestParticleMassIdx, TestParticleLumIdx, TestParticleBirthTimeIdx, true, true, TestParticleStageIdx, false);
-		} else {
+		}
+#endif // AMREX_SPACEDIM == 3
+	       	else {
 			amrex::Abort("Unknown particle type for star particles");
 		}
 
 		particleRegistry_[type] = std::move(descriptor);
 	}
-#endif // AMREX_SPACEDIM == 3
 
 	// Retrieve a particle descriptor by type
 	[[nodiscard]] auto getParticleDescriptor(ParticleType type) -> PhysicsParticleDescriptorBase *
@@ -760,13 +732,10 @@ template <typename problem_t> class PhysicsParticleRegister
 	{
 		const BL_PROFILE("PhysicsParticleRegister::depositSN()");
 		amrex::Real max_velocity = 0.0;
-		amrex::MultiFab state_buffer(state.boxArray(), state.DistributionMap(), state.nComp(), state.nGrow());
 		// this function is only implemented for some particle types, so we specify the particle type manually here
 		for (const auto &[type, descriptor] : particleRegistry_) {
-			if (descriptor->isStarParticle()) {
-				const amrex::Real max_velocity_ = descriptor->depositSN(state, state_buffer, lev, time, dt);
+				const amrex::Real max_velocity_ = descriptor->depositSN(state, lev, time, dt);
 				max_velocity = std::max(max_velocity, max_velocity_);
-			}
 		}
 		return max_velocity;
 	}
@@ -783,9 +752,7 @@ template <typename problem_t> class PhysicsParticleRegister
         state_buffer_fc[2].define(state_fc[2].boxArray(), state_fc[2].DistributionMap(), state_fc[2].nComp(), state_fc[2].nGrow()); 
         
         for (const auto &[type, descriptor] : particleRegistry_) {
-			if(descriptor->isStarParticle()){
 				descriptor->depositSN_fc(state,state_fc, state_buffer,state_buffer_fc, lev, time, dt, L, tau);
-			}
 		}	
 	}
 	
@@ -839,6 +806,37 @@ template <typename problem_t> class PhysicsParticleRegister
 		for (const auto &[type, descriptor] : particleRegistry_) {
 			descriptor->writePlotFile(plotfilename, getParticleTypeName(type));
 			descriptor->writeUnitsFile(plotfilename, getParticleTypeName(type));
+		}
+	}
+
+	// Write only specified particle types to plot file
+	void writePlotFileFiltered(const std::string &plotfilename, const std::vector<std::string> &particleTypeNames)
+	{
+		const BL_PROFILE("PhysicsParticleRegister::writePlotFileFiltered()");
+
+		// Iterate through registered particles and write those whose names match the requested list
+		for (const auto &[type, descriptor] : particleRegistry_) {
+			const std::string typeName = getParticleTypeName(type);
+
+			// Check if this particle type is in the requested list
+			if (std::find(particleTypeNames.begin(), particleTypeNames.end(), typeName) != particleTypeNames.end()) {
+				descriptor->writePlotFile(plotfilename, typeName);
+				descriptor->writeUnitsFile(plotfilename, typeName);
+			}
+		}
+
+		// Optionally warn about requested particle types that weren't found
+		for (const auto &requestedName : particleTypeNames) {
+			bool found = false;
+			for (const auto &[type, descriptor] : particleRegistry_) {
+				if (getParticleTypeName(type) == requestedName) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				amrex::Print() << "Warning: Requested particle type '" << requestedName << "' is not registered.\n";
+			}
 		}
 	}
 

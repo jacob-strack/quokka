@@ -10,9 +10,6 @@
 /// timestepping, solving, and I/O of a simulation.
 
 // c++ headers
-#include "AMReX_MFInterpolater.H"
-#include "AMReX_Periodicity.H"
-#include "AMReX_String.H"
 #include <cfenv>
 #include <cmath>
 #include <cstdio>
@@ -56,19 +53,22 @@ namespace filesystem = experimental::filesystem;
 #include "AMReX_IndexType.H"
 #include "AMReX_IntVect.H"
 #include "AMReX_Interpolater.H"
+#include "AMReX_MFInterpolater.H"
 #include "AMReX_MultiFab.H"
 #include "AMReX_MultiFabUtil.H"
 #include "AMReX_Orientation.H"
 #include "AMReX_ParallelDescriptor.H"
 #include "AMReX_ParmParse.H"
+#include "AMReX_Periodicity.H"
 #include "AMReX_PlotFileUtil.H"
 #include "AMReX_Print.H"
 #include "AMReX_REAL.H"
 #include "AMReX_SPACE.H"
+#include "AMReX_String.H"
 #include "AMReX_Utility.H"
 #include "AMReX_Vector.H"
 #include "AMReX_VisMF.H"
-#include <AMReX_FluxRegister.H>
+#include "AMReX_YAFluxRegister.H"
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <yaml-cpp/yaml.h>
@@ -77,9 +77,6 @@ namespace filesystem = experimental::filesystem;
 #include "particles/PhysicsParticles.hpp"
 
 #if AMREX_SPACEDIM == 3
-#include "AMReX_MLLinOp.H"
-#include "AMReX_MLMG.H"
-#include "AMReX_MLPoisson.H"
 #include "AMReX_OpenBC.H"
 #endif
 
@@ -91,11 +88,8 @@ namespace filesystem = experimental::filesystem;
 // internal headers
 #include "fundamental_constants.H"
 #include "grid.hpp"
+#include "hydro/hydro_system.hpp"
 #include "io/DiagBase.H"
-#include "io/DiagFramePlane.H"
-#include "io/DiagPDF.H"
-#include "io/DiagPlotfile.H"
-#include "io/DiagProjectionPlot.H"
 #include "io/io_utils.hpp"
 #include "io/projection.hpp"
 #include "physics_info.hpp"
@@ -103,6 +97,8 @@ namespace filesystem = experimental::filesystem;
 #ifdef QUOKKA_USE_OPENPMD
 #include "io/openPMD.hpp"
 #endif
+
+#define USE_YAFLUXREGISTER
 
 #ifdef AMREX_USE_ASCENT
 using namespace conduit;
@@ -161,12 +157,6 @@ enum class FillPatchType { fillpatch_class, fillpatch_function };
 // Main simulation class; solvers should inherit from this
 template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 {
-	// Allow diagnostic classes to access protected members
-	friend class DiagPlotfile;
-	friend class DiagProjectionPlot;
-	friend class DiagPDF;
-	friend class DiagFramePlane;
-
       public:
 	amrex::Real maxDt_ = std::numeric_limits<double>::max();  // no limit by default
 	amrex::Real initDt_ = std::numeric_limits<double>::max(); // no limit by default
@@ -253,8 +243,6 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	virtual void computeAfterEvolve(amrex::Vector<amrex::Real> &initSumCons) = 0;
 	virtual void fillPoissonRhsAtLevel(amrex::MultiFab &rhs, int lev) = 0;
 	virtual void applyPoissonGravityAtLevel(amrex::MultiFab const &phi, int lev, amrex::Real dt) = 0;
-	virtual void WriteSingleLevelPlotfileSimplified(const std::string &plotfile_prefix, const amrex::MultiFab &mf,
-							const amrex::Vector<std::string> &compNames, int lev, int interval) = 0;
 
 	// compute derived variables
 	virtual void ComputeDerivedVar(int lev, std::string const &dname, amrex::MultiFab &mf, int ncomp) const = 0;
@@ -293,7 +281,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	template <typename PreInterpHook, typename PostInterpHook>
 	void FillPatchWithData(int lev, amrex::Real time, amrex::MultiFab &mf, amrex::Vector<amrex::MultiFab *> &coarseData,
 			       amrex::Vector<amrex::Real> &coarseTime, amrex::Vector<amrex::MultiFab *> &fineData, amrex::Vector<amrex::Real> &fineTime,
-			       int icomp, int ncomp, amrex::Vector<amrex::BCRec> &BCs, quokka::centering &cen, quokka::direction dir, FillPatchType fptype,
+			       int icomp, int ncomp, amrex::Vector<amrex::BCRec> &BCs, quokka::centering &cen, FillPatchType fptype,
 			       PreInterpHook const &pre_interp, PostInterpHook const &post_interp);
 
 	static void InterpHookNone(amrex::MultiFab &mf, int scomp, int ncomp);
@@ -317,8 +305,12 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	void gravAccelAllLevels(amrex::Real dt);
 	void ellipticSolveAllLevels(amrex::Real dt);
 
-	void incrementFluxRegisters(amrex::FluxRegister *fr_as_crse, amrex::FluxRegister *fr_as_fine, std::array<amrex::MultiFab, AMREX_SPACEDIM> &fluxArrays,
-				    int lev, amrex::Real dt_lev);
+	void incrementFluxRegisters(amrex::MFIter &mfi, amrex::YAFluxRegister *fr_as_crse, amrex::YAFluxRegister *fr_as_fine,
+				    std::array<amrex::FArrayBox, AMREX_SPACEDIM> &fluxArrays, int lev, amrex::Real dt_lev);
+
+	void incrementFluxRegisters(amrex::YAFluxRegister *fr_as_crse, amrex::YAFluxRegister *fr_as_fine,
+				    std::array<amrex::MultiFab, AMREX_SPACEDIM> &fluxArrays, int lev, amrex::Real dt_lev);
+
 	void incrementEMFRegisters(amrex::EdgeFluxRegister *emf_as_crse, amrex::EdgeFluxRegister *emf_as_fine,
 				   std::array<amrex::MultiFab, AMREX_SPACEDIM> &ec_emf_components, int lev, amrex::Real dt_lev);
 
@@ -332,10 +324,10 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 								 int orig_comp); // template specialized by problem generator
 
 	// boundary condition
-	template <quokka::direction dir>
 	AMREX_GPU_DEVICE static void setCustomBoundaryConditionsFaceVar(const amrex::IntVect &iv, amrex::Array4<amrex::Real> const &dest, int dcomp,
 									int numcomp, amrex::GeometryData const &geom, amrex::Real time, const amrex::BCRec *bcr,
-									int bcomp, int orig_comp); // template specialized by problem generator
+									int bcomp,
+									int orig_comp); // template specialized by problem generator
 
 	// compute volume integrals
 	template <typename F> auto computeVolumeIntegral(F const &user_f) -> amrex::Real;
@@ -357,6 +349,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	void WriteStatisticsFile();
 	void WritePlotFile();
 	void WriteParticleFile();
+	void WriteProjectionPlotfile() const;
 	void WriteCheckpointFile() const;
 	void SetLastCheckpointSymlink(std::string const &checkpointname) const;
 	void writeFaceVelocitiesToDisk(std::array<amrex::MultiFab, AMREX_SPACEDIM> const &faceVel, int lev, int step);
@@ -378,7 +371,10 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	void interpolateMultiFabFromRestart(amrex::MultiFab &target, const amrex::MultiFab &source, const RefinementContext &context,
 					    const amrex::Geometry &coarse_geom, const amrex::Geometry &fine_geom, const amrex::Vector<amrex::BCRec> &bcs);
 	void interpolateFaceCenteredMultiFabFromRestart(amrex::MultiFab &target, const amrex::MultiFab &source, const RefinementContext &context,
-							const amrex::Geometry &coarse_geom, const amrex::Geometry &fine_geom, quokka::direction dir);
+							const amrex::Geometry &coarse_geom, const amrex::Geometry &fine_geom);
+	void interpolateFaceCenteredArrayFromRestart(amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &target_array,
+						     const amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &source_array, const RefinementContext &context,
+						     const amrex::Geometry &coarse_geom, const amrex::Geometry &fine_geom);
 	void loadMultiFabData(const RefinementContext &context);
 	auto loadBalanceOnRestart(const amrex::BoxArray &input_ba, int lev) -> amrex::BoxArray;
 
@@ -388,7 +384,7 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 
 	template <typename ContainerType>
 	void initializeParticleContainerFromCheckpoint(std::unique_ptr<ContainerType> &container, quokka::ParticleType particle_type,
-						       amrex::Vector<amrex::BoxArray> const &header_box_arrays);
+						       amrex::Vector<amrex::BoxArray> const &header_box_arrays, bool use_star_registration = false);
 
 	auto getGitHashForQuokka() const -> std::string;
 	auto getGitHashForAmrex() const -> std::string;
@@ -425,7 +421,10 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	// the lev/lev-1 interface (and has grid spacing associated with lev-1)
 	// therefore flux_reg[0] and flux_reg[nlevs_max] are never actually used in
 	// the reflux operation
-	amrex::Vector<std::unique_ptr<amrex::FluxRegister>> flux_reg_;
+	amrex::Vector<std::unique_ptr<amrex::YAFluxRegister>> flux_reg_;
+
+	// EdgeFluxRegister for EMF refluxing in constrained transport
+	// Same indexing convention as flux_reg_
 	amrex::Vector<std::unique_ptr<amrex::EdgeFluxRegister>> emf_reg_;
 
 	// This is for fillpatch during timestepping, but not for regridding.
@@ -452,23 +451,23 @@ template <typename problem_t> class AMRSimulation : public amrex::AmrCore
 	/// input parameters (if >= 0 we restart from a checkpoint)
 	std::string restart_chkfile;
 
-	bool useLuminosityTable_ = true;
-	std::string luminosityTableFilename_;
-	quokka::SpacingType rad_table_output_spacing_ = quokka::SpacingType::fast_log;
-
-#if AMREX_SPACEDIM == 3
-	quokka::LuminosityTables<Physics_Traits<problem_t>::nGroups> luminosityTables_;
-#endif // AMREX_SPACEDIM == 3
-
 	// Diagnostics
 	amrex::Vector<std::unique_ptr<DiagBase>> m_diagnostics;
 	amrex::Vector<std::string> m_diagVars;
 
 	/// AMR-specific parameters
 	int regrid_int = 2;	 // regrid interval (number of coarse steps)
-	int do_reflux = 1;	 // 1 == reflux, 0 == no reflux
+	int do_reflux = 1;	 // 1 == reflux, 0 == no reflux (DEPRECATED: use individual reflux controls below)
 	int do_subcycle = 1;	 // 1 == subcycle, 0 == no subcyle
 	int suppress_output = 0; // 1 == show timestepping, 0 == do not output each timestep
+
+	// Fine-grained reflux control parameters
+	int do_flux_register_init = 1;	    // 1 == initialize flux registers, 0 == skip initialization
+	int do_flux_register_reset = 1;	    // 1 == reset flux registers each timestep, 0 == skip reset
+	int do_flux_register_increment = 1; // 1 == increment flux registers during updates, 0 == skip increment
+	int do_emf_register_increment = 1;  // 1 == increment EMF registers for MHD, 0 == skip EMF increment
+	int do_reflux_apply_cc = 1;	    // 1 == apply reflux correction for cell-centered vars, 0 == skip
+	int do_reflux_apply_fc = 1;	    // 1 == apply reflux correction for face-centered vars (MHD), 0 == skip
 
 	// performance metrics
 	amrex::Long cellUpdates_ = 0;
@@ -776,18 +775,33 @@ template <typename problem_t> void AMRSimulation<problem_t>::readParameters()
 	// Default checkpoint prefix
 	pp.query("checkpoint_prefix", chk_file);
 
-	// Default do_reflux = 1
+	// Default do_reflux = 1 (DEPRECATED - for backward compatibility)
 	pp.query("do_reflux", do_reflux);
+
+	// Fine-grained reflux control parameters
+	// If do_reflux is set to 0, override all individual controls
+	if (do_reflux == 0) {
+		do_flux_register_init = 0;
+		do_flux_register_reset = 0;
+		do_flux_register_increment = 0;
+		do_emf_register_increment = 0;
+		do_reflux_apply_cc = 0;
+		do_reflux_apply_fc = 0;
+	} else {
+		// Query individual controls (defaults to 1 if not specified)
+		pp.query("do_flux_register_init", do_flux_register_init);
+		pp.query("do_flux_register_reset", do_flux_register_reset);
+		pp.query("do_flux_register_increment", do_flux_register_increment);
+		pp.query("do_emf_register_increment", do_emf_register_increment);
+		pp.query("do_reflux_apply_cc", do_reflux_apply_cc);
+		pp.query("do_reflux_apply_fc", do_reflux_apply_fc);
+	}
 
 	// Default do_subcycle = 1
 	pp.query("do_subcycle", do_subcycle);
 
 	// Default poisson_supercycle_interval = 1
 	pp.query("poisson_supercycle_interval", poissonSupercycleInterval_);
-
-	// Default Poisson solver tolerances
-	pp.query("poisson_reltol", reltolPoisson_);
-	pp.query("poisson_abstol", abstolPoisson_);
 
 	// Default do_tracers = 0 (turns on/off tracer particles)
 	pp.query("do_tracers", do_tracers);
@@ -836,59 +850,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::readParameters()
 
 	// Default max number of binary files per multifab when writing checkpoints
 	pp_amr.query("checkpoint_nfiles", checkpoint_nfiles);
-
-	// set particle luminosity table parameters
-	{
-		amrex::ParmParse const ppp("particles");
-		ppp.query("use_luminosity_table", useLuminosityTable_);
-		ppp.query("rad_table", luminosityTableFilename_);
-		ppp.query("rad_table_output_spacing", rad_table_output_spacing_);
-
-#if AMREX_SPACEDIM == 3
-		// if particle and radiation are enabled
-		if (particleRegister_.HasRadiatingParticles() && Physics_Traits<problem_t>::is_radiation_enabled) {
-			if (useLuminosityTable_) {
-				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!luminosityTableFilename_.empty(),
-								 "When use_luminosity_table is set to true, rad_table must be specified");
-
-				constexpr int nGroups = Physics_Traits<problem_t>::nGroups;
-				amrex::Print() << "Loading luminosity table from: " << luminosityTableFilename_ << "\n";
-
-				// Use specified spacing for luminosity values
-				luminosityTables_.luminosity = quokka::DataTable<2, nGroups>::CSVReader(luminosityTableFilename_, rad_table_output_spacing_);
-
-				amrex::Print() << "Luminosity table loaded successfully.\n";
-				amrex::Print() << fmt::format("\tTable dimensions: {} x {}\n", luminosityTables_.luminosity.size(0),
-							      luminosityTables_.luminosity.size(1));
-				amrex::Print() << fmt::format("\tNumber of outputs: {}\n", luminosityTables_.luminosity.num_outputs());
-
-				// Validate table metadata matches expected hardcoded values
-				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-				    luminosityTables_.luminosity.input_name(0) == "age",
-				    fmt::format("Luminosity table first input must be 'age', got '{}'", luminosityTables_.luminosity.input_name(0)));
-				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-				    luminosityTables_.luminosity.input_name(1) == "mass",
-				    fmt::format("Luminosity table second input must be 'mass', got '{}'", luminosityTables_.luminosity.input_name(1)));
-				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-				    luminosityTables_.luminosity.input_unit(0) == "year",
-				    fmt::format("Luminosity table first input unit must be 'year', got '{}'", luminosityTables_.luminosity.input_unit(0)));
-				AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-				    luminosityTables_.luminosity.input_unit(1) == "Msun",
-				    fmt::format("Luminosity table second input unit must be 'Msun', got '{}'", luminosityTables_.luminosity.input_unit(1)));
-
-				// Validate all output units are "erg/s"
-				for (int i = 0; i < nGroups; ++i) {
-					AMREX_ALWAYS_ASSERT_WITH_MESSAGE(luminosityTables_.luminosity.output_unit(i) == "erg/s",
-									 fmt::format("Luminosity table output unit {} must be 'erg/s', got '{}'", i,
-										     luminosityTables_.luminosity.output_unit(i)));
-				}
-
-				// Set global pointer for access from particle update functions
-				quokka::g_luminosity_tables_ptr<nGroups> = &luminosityTables_;
-			}
-		}
-#endif // AMREX_SPACEDIM == 3
-	}
 }
 
 template <typename problem_t> void AMRSimulation<problem_t>::rereadRuntimeParameters()
@@ -922,14 +883,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::setInitialCondition
 		ReadCheckpointFile();
 	}
 
-	// Ensure consistency between particle radiation settings and luminosity data table configuration
-	if constexpr (Physics_Traits<problem_t>::is_radiation_enabled) {
-		if (particleRegister_.HasRadiatingParticles()) {
-			AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!(useLuminosityTable_ && luminosityTableFilename_.empty()),
-							 "When use_luminosity_table is set to true, rad_table must be specified");
-		}
-	}
-
 	calculateGpotAllLevels();
 
 	// abort if amrex.async_out=1, it is currently broken
@@ -949,6 +902,10 @@ template <typename problem_t> void AMRSimulation<problem_t>::setInitialCondition
 
 	if ((plotfileInterval_ > 0 || plotTimeInterval_ > 0) && !skipInitialPlotfile_) {
 		WritePlotFile();
+	}
+
+	if (projectionInterval_ > 0) {
+		WriteProjectionPlotfile();
 	}
 
 	if (particleInterval_ > 0) {
@@ -1131,6 +1088,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 #ifdef AMREX_USE_ASCENT
 	int last_ascent_step = 0;
 #endif
+	int last_projection_step = 0;
 	int last_particle_step = 0;
 	int last_statistics_step = 0;
 	int last_plot_file_step = 0;
@@ -1241,12 +1199,15 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 			}
 
 			// Stellar evolution and SN deposition; only apply to star particles
-			// Update particle properties (e.g., luminosity) before particle-mesh interaction
-			particleRegister_.updateParticleProperties(cur_time);
+			if (particleRegister_.HasStarParticles()) {
+				// Update particle properties (e.g., luminosity) before particle-mesh interaction
+				particleRegister_.updateParticleProperties(cur_time);
 
-			// TODO(cch): Need to take care of AMR subcycling
-			particleMeshInteraction(cur_time, dt_[0]);
-			particleMeshInteraction_fc(cur_time, dt_[0]); 
+				// TODO(cch): Need to take care of AMR subcycling
+				particleMeshInteraction(cur_time, dt_[0]);
+				for(int idim = 0; idim < AMREX_SPACEDIM; idim++)
+					particleMeshInteraction_fc(cur_time, dt_[0]); 
+			}
 
 			// Use the new type-aware particle destruction method
 			// TODO(cch): Need to take care of AMR subcycling
@@ -1281,6 +1242,11 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 			WritePlotFile();
 		}
 
+		if (projectionInterval_ > 0 && (step + 1) % projectionInterval_ == 0) {
+			last_projection_step = step + 1;
+			WriteProjectionPlotfile();
+		}
+
 		if (particleInterval_ > 0 && (step + 1) % particleInterval_ == 0) {
 			last_particle_step = step + 1;
 			WriteParticleFile();
@@ -1297,87 +1263,23 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 		doDiagnostics();
 
 		// Writing Plot files at time intervals
-		if (plotTimeInterval_ > 0 && next_plot_file_time <= cur_time) {
+		if (last_plot_file_step != step + 1 && plotTimeInterval_ > 0 && next_plot_file_time <= cur_time) {
 			next_plot_file_time += plotTimeInterval_;
-			if (last_plot_file_step != step + 1) {
-				last_plot_file_step = step + 1;
-				WritePlotFile();
-			}
-		}
-
-		// Forced plotfile output via sentinel file
-		const std::filesystem::path sentinel_path{"outputNow"};
-		bool force_plotfile_now = false;
-		if (amrex::ParallelDescriptor::IOProcessor()) {
-			std::error_code exists_ec;
-			force_plotfile_now = std::filesystem::exists(sentinel_path, exists_ec) && !exists_ec;
-			if (exists_ec) {
-				amrex::Print() << "[WARNING] Could not check for '" << sentinel_path.string() << "': " << exists_ec.message() << '\n';
-				force_plotfile_now = false;
-			}
-		}
-		int force_plotfile_flag = force_plotfile_now ? 1 : 0;
-		amrex::ParallelDescriptor::Bcast(&force_plotfile_flag, 1, amrex::ParallelDescriptor::IOProcessorNumber());
-		force_plotfile_now = (force_plotfile_flag == 1);
-
-		if (force_plotfile_now) {
-			if (last_plot_file_step != step + 1) {
-				last_plot_file_step = step + 1;
-				WritePlotFile();
-			}
-			if (amrex::ParallelDescriptor::IOProcessor()) {
-				std::error_code remove_ec;
-				if (!std::filesystem::remove(sentinel_path, remove_ec) && remove_ec) {
-					amrex::Print()
-					    << "[WARNING] Failed to remove sentinel '" << sentinel_path.string() << "': " << remove_ec.message() << '\n';
-				}
-			}
+			WritePlotFile();
 		}
 
 		// IMPORTANT: this MUST be written *after* the plotfile to avoid corruption:
 		// 	https://github.com/quokka-astro/quokka/issues/554
 		if (checkpointTimeInterval_ > 0 && next_chk_file_time <= cur_time) {
 			next_chk_file_time += checkpointTimeInterval_;
-			if (last_chk_file_step != step + 1) {
-				last_chk_file_step = step + 1;
-				WriteCheckpointFile();
-			}
+			WriteCheckpointFile();
 		}
 
 		// IMPORTANT: this MUST be written *after* the plotfile to avoid corruption:
 		// 	https://github.com/quokka-astro/quokka/issues/554
 		if (checkpointInterval_ > 0 && (step + 1) % checkpointInterval_ == 0) {
-			if (last_chk_file_step != step + 1) {
-				last_chk_file_step = step + 1;
-				WriteCheckpointFile();
-			}
-		}
-
-		// Forced checkpoint output via sentinel file
-		const std::filesystem::path checkpoint_sentinel{"checkpointNow"};
-		bool force_checkpoint_now = false;
-		if (amrex::ParallelDescriptor::IOProcessor()) {
-			std::error_code chk_exists_ec;
-			force_checkpoint_now = std::filesystem::exists(checkpoint_sentinel, chk_exists_ec) && !chk_exists_ec;
-			if (chk_exists_ec) {
-				amrex::Print() << "[WARNING] Could not check for '" << checkpoint_sentinel.string() << "': " << chk_exists_ec.message() << '\n';
-				force_checkpoint_now = false;
-			}
-		}
-		int force_checkpoint_flag = force_checkpoint_now ? 1 : 0;
-		amrex::ParallelDescriptor::Bcast(&force_checkpoint_flag, 1, amrex::ParallelDescriptor::IOProcessorNumber());
-		force_checkpoint_now = (force_checkpoint_flag == 1);
-
-		if (force_checkpoint_now && last_chk_file_step != step + 1) {
 			last_chk_file_step = step + 1;
 			WriteCheckpointFile();
-			if (amrex::ParallelDescriptor::IOProcessor()) {
-				std::error_code remove_ec;
-				if (!std::filesystem::remove(checkpoint_sentinel, remove_ec) && remove_ec) {
-					amrex::Print()
-					    << "[WARNING] Failed to remove sentinel '" << checkpoint_sentinel.string() << "': " << remove_ec.message() << '\n';
-				}
-			}
 		}
 
 		if (cur_time >= stopTime_ - 1.e-6 * dt_[0]) {
@@ -1434,6 +1336,11 @@ template <typename problem_t> void AMRSimulation<problem_t>::evolve()
 		WritePlotFile();
 	}
 
+	// write final projection
+	if (projectionInterval_ > 0 && istep[0] > last_projection_step) {
+		WriteProjectionPlotfile();
+	}
+
 	// write final particle file
 	if (particleInterval_ > 0 && istep[0] > last_particle_step) {
 		WriteParticleFile();
@@ -1467,7 +1374,16 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 
 		BL_PROFILE_REGION("GravitySolver"); // NOLINT(misc-const-correctness)
 
+		// set up elliptic solve object
+		amrex::OpenBCSolver poissonSolver(Geom(0, finest_level), boxArray(0, finest_level), DistributionMap(0, finest_level));
+		if (verbose) {
+			poissonSolver.setVerbose(1);
+			poissonSolver.setBottomVerbose(0);
+			amrex::Print() << "Doing Poisson solve...\n\n";
+		}
+
 		phi.resize(finest_level + 1);
+		// solve Poisson equation with open b.c. using the method of James (1977)
 		amrex::Vector<amrex::MultiFab> rhs(finest_level + 1);
 		constexpr int nghost_phi = 1;
 		constexpr int nghost_deposit = 1; // CIC deposition requires 1 ghost cell
@@ -1475,7 +1391,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 		constexpr int nghost_rhs = nghost_deposit + nghost_drift;
 		constexpr int ncomp = 1;
 		amrex::Real rhs_min = std::numeric_limits<amrex::Real>::max();
-
 		for (int lev = 0; lev <= finest_level; ++lev) {
 			phi[lev].define(grids[lev], dmap[lev], ncomp, nghost_phi);
 			rhs[lev].define(grids[lev], dmap[lev], ncomp, nghost_rhs);
@@ -1492,26 +1407,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 		// deposit particle mass from all particles that have mass into rhs by accumulation
 		if constexpr (Particle_Traits<problem_t>::particle_switch != ParticleSwitch::None) {
 			if (particleRegister_.HasMassiveParticles()) {
-				// create temporary buffer for mass deposition
-				// The buffer needs an extra component for the count (last component)
-				amrex::Vector<amrex::MultiFab> rhs_buffer(finest_level + 1);
-				for (int lev = 0; lev <= finest_level; ++lev) {
-					rhs_buffer[lev].define(grids[lev], dmap[lev], ncomp + 1, nghost_rhs);
-					rhs_buffer[lev].setVal(0);
-				}
-
-				// deposit mass into temporary buffer
-				particleRegister_.depositMass(amrex::GetVecOfPtrs(rhs_buffer), finest_level, Gconst_);
-
-				// apply roundoff to buffer before adding to rhs
-				for (int lev = 0; lev <= finest_level; ++lev) {
-					quokka::ParticleUtils::roundoffMultiFab(rhs_buffer[lev]);
-				}
-
-				// add buffer to rhs
-				for (int lev = 0; lev <= finest_level; ++lev) {
-					amrex::MultiFab::Add(rhs[lev], rhs_buffer[lev], 0, 0, ncomp, 0);
-				}
+				particleRegister_.depositMass(amrex::GetVecOfPtrs(rhs), finest_level, Gconst_);
 			}
 		}
 
@@ -1520,122 +1416,15 @@ template <typename problem_t> void AMRSimulation<problem_t>::calculateGpotAllLev
 			AMREX_ALWAYS_ASSERT(!rhs[lev].contains_nan());
 		}
 
-		// Analyze boundary conditions for each dimension
-		amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> bc_lo;
-		amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> bc_hi;
-		int num_periodic_dims = 0;
-		std::string bc_description = "Gravity BCs: ";
-
-		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-			std::string dim_name;
-			if (idim == 0) {
-				dim_name = "x";
-			} else if (idim == 1) {
-				dim_name = "y";
-			} else {
-				dim_name = "z";
-			}
-
-			if (geom[0].isPeriodic(idim)) {
-				bc_lo[idim] = amrex::LinOpBCType::Periodic;
-				bc_hi[idim] = amrex::LinOpBCType::Periodic;
-				num_periodic_dims++;
-				bc_description += dim_name + ":periodic ";
-			} else {
-				// Use homogeneous Dirichlet (phi = 0) for non-periodic dimensions
-				bc_lo[idim] = amrex::LinOpBCType::Dirichlet;
-				bc_hi[idim] = amrex::LinOpBCType::Dirichlet;
-				bc_description += dim_name + ":Dirichlet ";
-			}
-		}
-
-		if (verbose) {
-			amrex::Print() << bc_description << "\n";
-		}
-
-		// Determine solver type: use MLMG if any dimension is periodic, otherwise OpenBCSolver
-		const bool use_mlmg_solver = (num_periodic_dims > 0);
-
-		if (use_mlmg_solver) {
-			// Use MLMG solver with mixed/periodic boundary conditions
-			if (verbose) {
-				if (num_periodic_dims == 3) {
-					amrex::Print() << "Using MLMG solver with fully periodic boundaries...\n\n";
-				} else if (num_periodic_dims == 2) {
-					amrex::Print() << "Using MLMG solver with mixed periodic/Dirichlet boundaries...\n\n";
-				}
-			}
-
-			// Create MLPoisson linear operator with proper LPInfo for AMR
-			amrex::LPInfo info;
-			// For AMR problems, we need to ensure proper coarsening
-			if (finest_level > 0) {
-				info.setAgglomeration(false); // Disable agglomeration for AMR
-				info.setConsolidation(false); // Disable consolidation for AMR
-			}
-
-			amrex::MLPoisson mlpoisson(Geom(0, finest_level), boxArray(0, finest_level), DistributionMap(0, finest_level), info);
-
-			// Set the mixed boundary conditions (already computed above)
-			mlpoisson.setDomainBC(bc_lo, bc_hi);
-
-			// Set level boundary conditions for each AMR level
-			for (int lev = 0; lev <= finest_level; ++lev) {
-				// For gravity problems with mixed BCs, we don't need to specify Dirichlet values
-				// MLMG will automatically handle the gauge freedom and find a solution
-				// The gravitational force F = -∇φ is gauge invariant (independent of φ + constant)
-				mlpoisson.setLevelBC(lev, nullptr);
-			}
-
-			// Create MLMG solver
-			amrex::MLMG mlmg(mlpoisson);
-			if (verbose) {
-				mlmg.setVerbose(1);
-				mlmg.setBottomVerbose(0);
-			}
-
-			// Set solver parameters optimized for gravity problems
-			// mlmg.setMaxIter(200);
-			// mlmg.setBottomMaxIter(200);
-
-			// MLMG automatically handles solvability constraints for singular problems
-			// (periodic boundaries with no Dirichlet conditions). The linear operator
-			// automatically detects singular problems and applies the necessary corrections
-			// through the getSolvabilityOffset() and fixSolvabilityByOffset() methods.
-			// No manual RHS mean subtraction is needed.
-
-			// Solve the system
-			amrex::Real abstol = abstolPoisson_ * std::abs(rhs_min);
-			amrex::Real final_resnorm = mlmg.solve(amrex::GetVecOfPtrs(phi), amrex::GetVecOfConstPtrs(rhs), reltolPoisson_, abstol);
-
-			// Check convergence
-			if (verbose) {
-				amrex::Print() << "MLMG converged with final residual norm: " << final_resnorm << "\n";
-			}
-		} else {
-			// Use OpenBC solver for open boundary conditions
-			if (verbose) {
-				amrex::Print() << "Doing Poisson solve with open boundaries using OpenBCSolver...\n\n";
-			}
-
-			amrex::OpenBCSolver poissonSolver(Geom(0, finest_level), boxArray(0, finest_level), DistributionMap(0, finest_level));
-			if (verbose) {
-				poissonSolver.setVerbose(1);
-				poissonSolver.setBottomVerbose(0);
-			}
-
-			amrex::Real abstol = abstolPoisson_ * rhs_min;
-			poissonSolver.solve(amrex::GetVecOfPtrs(phi), amrex::GetVecOfConstPtrs(rhs), reltolPoisson_, abstol);
-		}
-
+		amrex::Real abstol = abstolPoisson_ * rhs_min;
+		poissonSolver.solve(amrex::GetVecOfPtrs(phi), amrex::GetVecOfConstPtrs(rhs), reltolPoisson_, abstol);
 		if (verbose) {
 			amrex::Print() << "\n";
 		}
 
 		// check for NaN
 		for (int lev = 0; lev <= finest_level; ++lev) {
-			// NOTE: this fails when multiple levels are fully refined when open boundary condition is used.
-			AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!phi[lev].contains_nan(), fmt::format("NaN detected in phi at level {} after Poisson solve", lev));
+			AMREX_ALWAYS_ASSERT(!phi[lev].contains_nan()); // NOTE: this fails when multiple levels are fully refined
 		}
 	}
 #endif
@@ -1769,7 +1558,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 {
 	const BL_PROFILE("AMRSimulation::particleMeshInteraction()");
 	// Need 4 ghost cells for SN deposition with a SNR radius of 3 dx.
-	const int nghost = 4;
+	const int nghost = 6;
 
 	// Assume all SN progenitors are at the finest level
 	const int lev = finest_level;
@@ -1780,19 +1569,14 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 	state_new_cc_[lev].FillBoundary(geom[lev].periodicity());
 
 	// Create a MultiFab to hold the change of states (density, 3 x momentum, internal energy, energy) during particle-mesh interaction
-	// The extra component is for the particle counts in cells
-	amrex::MultiFab accretion_rate_at_level(grids[lev], dmap[lev], Physics_NumVars::numHydroVars + 1, nghost);
+	amrex::MultiFab accretion_rate_at_level(grids[lev], dmap[lev], Physics_NumVars::numHydroVars, nghost);
 
 	accretion_rate_at_level.setVal(0.0);
 
 	// Sink accretion, stage 1: compute the accretion rate
 	particleRegister_.computeSinkAccretion(state_new_cc_[lev], accretion_rate_at_level, lev, time, dt);
 
-	// Apply roundoff to accretion_rate_at_level
-	// TODO(cch): compute accumulative errors and pass it to roundoffMultiFab
-	quokka::ParticleUtils::roundoffMultiFab(accretion_rate_at_level);
-
-	// Sink accretion, stage 2: update the particle states -- compute scale_down, apply to particle, apply to cells
+	// Sink accretion, stage 2: update the particle states
 	particleRegister_.applySinkAccretion(state_new_cc_[lev], accretion_rate_at_level, geom[lev], lev, time, dt);
 
 	// We allow particle formation at the finest level only to avoid duplicate particle creation from multiple levels at the same location.
@@ -1801,13 +1585,16 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 	// Deposit the SN particles into the MultiFab
 	const amrex::Real max_velocity = particleRegister_.depositSN(state_new_cc_[lev], lev, time, dt);
 
+
 	// Check if the maximum velocity is greater than the threshold
 	constexpr amrex::Real v_over_c_threshold = 0.03;
 	if (max_velocity > v_over_c_threshold * C::c_light) {
 		amrex::Print() << "WARNING: SN remnant net velocity (" << max_velocity / C::c_light << " c) greater than " << v_over_c_threshold
-			       << " c threshold!" << "\n";
+			       << " c threshold!"
+			       << "\n";
 	}
 }
+
 template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInteraction_fc(amrex::Real time, amrex::Real dt)
 {
 	//leave if no mhd or no magnetic feedback 
@@ -1818,6 +1605,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::particleMeshInterac
 	particleRegister_.depositSN_fc(state_new_cc_[lev],state_new_fc_[lev], lev, time, dt, 262*3.086e18, 0.2*3.154e13); 
 }
 #endif // AMREX_SPACEDIM == 3
+
 
 // N.B.: This function actually works for subcycled or not subcycled, as long as
 // nsubsteps[lev] is set correctly.
@@ -1904,19 +1692,20 @@ template <typename problem_t> void AMRSimulation<problem_t>::timeStepWithSubcycl
 		}
 
 		// do post-timestep operations
-
-		if (do_reflux != 0) {
-			if (flux_reg_[lev + 1] != nullptr) {
-				flux_reg_[lev + 1]->Reflux(state_new_cc_[lev], 1.0, 0, 0, state_new_cc_[lev].nComp(), geom[lev]);
-			}
-			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-				if (emf_reg_[lev + 1] != nullptr) {
-					// NOLINTNEXTLINE(readability-container-data-pointer)
-					emf_reg_[lev + 1]->Reflux({AMREX_D_DECL(&state_new_fc_[lev][0], &state_new_fc_[lev][1], &state_new_fc_[lev][2])});
-				}
-			}
+		if (do_reflux_apply_cc != 0) {
+			// update lev based on coarse-fine flux mismatch
+			amrex::Gpu::streamSynchronizeAll();
+			flux_reg_[lev + 1]->Reflux(state_new_cc_[lev]);
 		}
 
+		if (do_reflux_apply_fc != 0) {
+			// update magnetic field based on coarse-fine EMF mismatch
+			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
+				// NOLINTNEXTLINE(readability-container-data-pointer)
+				if(emf_reg_[lev + 1] != nullptr)
+					emf_reg_[lev + 1]->Reflux({AMREX_D_DECL(&state_new_fc_[lev][0], &state_new_fc_[lev][1], &state_new_fc_[lev][2])});
+			}
+		}
 		AverageDownTo(lev); // average lev+1 down to lev
 		FixupState(lev);    // fix any unphysical states created by reflux or averaging
 
@@ -1950,52 +1739,49 @@ template <typename problem_t> void AMRSimulation<problem_t>::timeStepWithSubcycl
 }
 
 template <typename problem_t>
-void AMRSimulation<problem_t>::incrementFluxRegisters(amrex::FluxRegister *fr_as_crse, amrex::FluxRegister *fr_as_fine,
-						      std::array<amrex::MultiFab, AMREX_SPACEDIM> &fluxArrays, int const lev, amrex::Real const dt_lev)
+void AMRSimulation<problem_t>::incrementFluxRegisters(amrex::MFIter &mfi, amrex::YAFluxRegister *fr_as_crse, amrex::YAFluxRegister *fr_as_fine,
+						      std::array<amrex::FArrayBox, AMREX_SPACEDIM> &fluxArrays, int const lev, amrex::Real const dt_lev)
 {
 	BL_PROFILE("AMRSimulation::incrementFluxRegisters()"); // NOLINT(misc-const-correctness)
-
-	if ((fr_as_crse == nullptr) && (fr_as_fine == nullptr)) {
-		return;
-	}
-
-	const auto dx = geom[lev].CellSizeArray();
-	amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> face_area{};
-
-	if constexpr (AMREX_SPACEDIM == 1) {
-		face_area[0] = 1.0;
-	} else if constexpr (AMREX_SPACEDIM == 2) {
-		face_area[0] = dx[1];
-		face_area[1] = dx[0];
-	} else {
-		face_area[0] = dx[1] * dx[2];
-		face_area[1] = dx[0] * dx[2];
-		face_area[2] = dx[0] * dx[1];
-	}
 
 	if (fr_as_crse != nullptr) {
 		AMREX_ASSERT(lev < finestLevel());
 		AMREX_ASSERT(fr_as_crse == flux_reg_[lev + 1].get());
-		for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
-			int const ncomp = fluxArrays[dir].nComp();
-			if (ncomp == 0) {
-				continue;
-			}
-			fr_as_crse->CrseInit(fluxArrays[dir], dir, 0, 0, ncomp, -dt_lev * face_area[dir], amrex::FluxRegister::ADD);
-		}
+		fr_as_crse->CrseAdd(mfi, {AMREX_D_DECL(&fluxArrays[0], &fluxArrays[1], &fluxArrays[2])}, // NOLINT(readability-container-data-pointer)
+				    geom[lev].CellSize(), dt_lev, amrex::RunOn::Gpu);
 	}
 
 	if (fr_as_fine != nullptr) {
 		AMREX_ASSERT(lev > 0);
 		AMREX_ASSERT(fr_as_fine == flux_reg_[lev].get());
-		for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
-			int const ncomp = fluxArrays[dir].nComp();
-			if (ncomp == 0) {
-				continue;
-			}
-			fr_as_fine->FineAdd(fluxArrays[dir], dir, 0, 0, ncomp, dt_lev * face_area[dir]);
+		fr_as_fine->FineAdd(mfi, {AMREX_D_DECL(&fluxArrays[0], &fluxArrays[1], &fluxArrays[2])}, // NOLINT(readability-container-data-pointer)
+				    geom[lev].CellSize(), dt_lev, amrex::RunOn::Gpu);
+	}
+}
+
+template <typename problem_t>
+void AMRSimulation<problem_t>::incrementFluxRegisters(amrex::YAFluxRegister *fr_as_crse, amrex::YAFluxRegister *fr_as_fine,
+						      std::array<amrex::MultiFab, AMREX_SPACEDIM> &fluxArrays, int const lev, amrex::Real const dt_lev)
+{
+	BL_PROFILE("AMRSimulation::incrementFluxRegisters()"); // NOLINT(misc-const-correctness)
+
+	amrex::Gpu::streamSynchronizeAll();
+	for (amrex::MFIter mfi(state_new_cc_[lev]); mfi.isValid(); ++mfi) {
+		if (fr_as_crse != nullptr) {
+			AMREX_ASSERT(lev < finestLevel());
+			AMREX_ASSERT(fr_as_crse == flux_reg_[lev + 1].get());
+			fr_as_crse->CrseAdd(mfi, {AMREX_D_DECL(fluxArrays[0].fabPtr(mfi), fluxArrays[1].fabPtr(mfi), fluxArrays[2].fabPtr(mfi))},
+					    geom[lev].CellSize(), dt_lev, amrex::RunOn::Gpu);
+		}
+
+		if (fr_as_fine != nullptr) {
+			AMREX_ASSERT(lev > 0);
+			AMREX_ASSERT(fr_as_fine == flux_reg_[lev].get());
+			fr_as_fine->FineAdd(mfi, {AMREX_D_DECL(fluxArrays[0].fabPtr(mfi), fluxArrays[1].fabPtr(mfi), fluxArrays[2].fabPtr(mfi))},
+					    geom[lev].CellSize(), dt_lev, amrex::RunOn::Gpu);
 		}
 	}
+	amrex::Gpu::streamSynchronizeAll();
 }
 
 template <typename problem_t>
@@ -2005,6 +1791,7 @@ void AMRSimulation<problem_t>::incrementEMFRegisters(amrex::EdgeFluxRegister *em
 	BL_PROFILE("AMRSimulation::incrementEMFRegisters()"); // NOLINT(misc-const-correctness)
 
 #if (AMREX_SPACEDIM == 3)
+	amrex::Gpu::streamSynchronizeAll();
 	for (amrex::MFIter mfi(state_new_cc_[lev]); mfi.isValid(); ++mfi) {
 		if (emf_as_crse != nullptr) {
 			AMREX_ASSERT(lev < finestLevel());
@@ -2020,8 +1807,7 @@ void AMRSimulation<problem_t>::incrementEMFRegisters(amrex::EdgeFluxRegister *em
 					     dt_lev);
 		}
 	}
-#else
-	amrex::ignore_unused(emf_as_crse, emf_as_fine, ec_emf_components, lev, dt_lev);
+	amrex::Gpu::streamSynchronizeAll();
 #endif
 }
 
@@ -2047,8 +1833,11 @@ template <typename problem_t> auto AMRSimulation<problem_t>::getAmrInterpolaterC
 
 template <typename problem_t> auto AMRSimulation<problem_t>::getAmrInterpolaterFaceCentered() -> amrex::Interpolater *
 {
-	// Use linear interpolation for generic face-centered operations (e.g., ghost fills).
-	return &amrex::face_linear_interp;
+	// Use linear interpolation for individual face MultiFabs
+	// face_divfree_interp is only used in array-based functions (FillCoarsePatchFaceArray)
+	// because it doesn't implement interp_face which is called by FillPatchTwoLevels
+	amrex::Interpolater *mapper = &amrex::face_linear_interp;
+	return mapper; // global object, so this is ok
 }
 
 // Make a new level using provided BoxArray and DistributionMapping and fill
@@ -2071,10 +1860,13 @@ void AMRSimulation<problem_t>::MakeNewLevelFromCoarse(int level, amrex::Real tim
 	tNew_[level] = time;
 	tOld_[level] = time - 1.e200;
 
-	if (level > 0 && (do_reflux != 0)) {
-		flux_reg_[level] = std::make_unique<amrex::FluxRegister>(ba, dm, refRatio(level - 1), level, ncomp_cc);
+	if (level > 0 && (do_flux_register_init != 0)) {
+		flux_reg_[level] = std::make_unique<amrex::YAFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
+									   Geom(level - 1), refRatio(level - 1), level, ncomp_cc);
+
+		// Initialize EdgeFluxRegister for MHD
 		if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-			const int nemf_vars = 1;
+			const int nemf_vars = 1; // EMF has 1 component per dimension
 			emf_reg_[level] = std::make_unique<amrex::EdgeFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
 										    Geom(level - 1), nemf_vars);
 		}
@@ -2090,14 +1882,18 @@ void AMRSimulation<problem_t>::MakeNewLevelFromCoarse(int level, amrex::Real tim
 			state_old_fc_[level][idim] =
 			    amrex::MultiFab(amrex::convert(ba, amrex::IntVect::TheDimensionVector(idim)), dm, ncomp_per_dim_fc, nghost_fc);
 		}
+
+		// Use array-based interpolation for divergence-free constraint
 		amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> new_mf_array;
 		amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> old_mf_array;
 		amrex::Array<amrex::Vector<amrex::BCRec>, AMREX_SPACEDIM> BCs_array;
+
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			new_mf_array[idim] = &state_new_fc_[level][idim];
 			old_mf_array[idim] = &state_old_fc_[level][idim];
 			BCs_array[idim] = BCs_fc_;
 		}
+
 		FillCoarsePatchFaceArray(level, time, new_mf_array, 0, ncomp_per_dim_fc, BCs_array);
 		FillCoarsePatchFaceArray(level, time, old_mf_array, 0, ncomp_per_dim_fc, BCs_array);
 	}
@@ -2126,10 +1922,13 @@ void AMRSimulation<problem_t>::RemakeLevel(int level, amrex::Real time, const am
 	tNew_[level] = time;
 	tOld_[level] = time - 1.e200;
 
-	if (level > 0 && (do_reflux != 0)) {
-		flux_reg_[level] = std::make_unique<amrex::FluxRegister>(ba, dm, refRatio(level - 1), level, ncomp_cc);
+	if (level > 0 && (do_flux_register_init != 0)) {
+		flux_reg_[level] = std::make_unique<amrex::YAFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
+									   Geom(level - 1), refRatio(level - 1), level, ncomp_cc);
+
+		// Initialize EdgeFluxRegister for MHD
 		if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-			const int nemf_vars = 1;
+			const int nemf_vars = 1; // EMF has 1 component per dimension
 			emf_reg_[level] = std::make_unique<amrex::EdgeFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
 										    Geom(level - 1), nemf_vars);
 		}
@@ -2142,19 +1941,20 @@ void AMRSimulation<problem_t>::RemakeLevel(int level, amrex::Real time, const am
 		amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> int_state_new_fc;
 		amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> int_state_old_fc;
 		amrex::Array<amrex::Vector<amrex::BCRec>, AMREX_SPACEDIM> BCs_array;
+		// define arrays
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			int_state_new_fc[idim] = amrex::MultiFab(amrex::convert(ba, amrex::IntVect::TheDimensionVector(idim)), dm, ncomp_per_dim_fc, nghost_fc);
 			int_state_old_fc[idim] = amrex::MultiFab(amrex::convert(ba, amrex::IntVect::TheDimensionVector(idim)), dm, ncomp_per_dim_fc, nghost_fc);
 			BCs_array[idim] = BCs_fc_;
 		}
+		// create array of pointers for FillCoarsePatchFaceArray
 		amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> int_state_new_fc_ptr;
-		amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> int_state_old_fc_ptr;
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			int_state_new_fc_ptr[idim] = &int_state_new_fc[idim];
-			int_state_old_fc_ptr[idim] = &int_state_old_fc[idim];
 		}
 		FillCoarsePatchFaceArray(level, time, int_state_new_fc_ptr, 0, ncomp_per_dim_fc, BCs_array);
-		FillCoarsePatchFaceArray(level, time, int_state_old_fc_ptr, 0, ncomp_per_dim_fc, BCs_array);
+
+		// swap pointers
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			std::swap(int_state_new_fc[idim], state_new_fc_[level][idim]);
 			std::swap(int_state_old_fc[idim], state_old_fc_[level][idim]);
@@ -2198,29 +1998,11 @@ template <typename problem_t> struct setBoundaryFunctor {
 };
 
 template <typename problem_t> struct setBoundaryFunctorFaceVar {
-	quokka::direction dir_;
-
-	// Constructor to store the direction
-	AMREX_GPU_HOST_DEVICE explicit setBoundaryFunctorFaceVar(quokka::direction dir) : dir_(dir) {}
-
-	// Default constructor (if needed for compatibility)
-	AMREX_GPU_HOST_DEVICE setBoundaryFunctorFaceVar() : dir_(quokka::direction::na) {}
-
 	AMREX_GPU_DEVICE void operator()(const amrex::IntVect &iv, amrex::Array4<amrex::Real> const &dest, const int &dcomp, const int &numcomp,
 					 amrex::GeometryData const &geom, const amrex::Real &time, const amrex::BCRec *bcr, int bcomp,
 					 const int &orig_comp) const
 	{
-		// Now pass the stored direction to the function
-		if (dir_ == quokka::direction::x) {
-			AMRSimulation<problem_t>::template setCustomBoundaryConditionsFaceVar<quokka::direction::x>(iv, dest, dcomp, numcomp, geom, time, bcr,
-														    bcomp, orig_comp);
-		} else if (dir_ == quokka::direction::y) {
-			AMRSimulation<problem_t>::template setCustomBoundaryConditionsFaceVar<quokka::direction::y>(iv, dest, dcomp, numcomp, geom, time, bcr,
-														    bcomp, orig_comp);
-		} else if (dir_ == quokka::direction::z) {
-			AMRSimulation<problem_t>::template setCustomBoundaryConditionsFaceVar<quokka::direction::z>(iv, dest, dcomp, numcomp, geom, time, bcr,
-														    bcomp, orig_comp);
-		}
+		AMRSimulation<problem_t>::setCustomBoundaryConditionsFaceVar(iv, dest, dcomp, numcomp, geom, time, bcr, bcomp, orig_comp);
 	}
 };
 
@@ -2238,7 +2020,6 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE void AMRSimulation<problem_t>::setCustomBoun
 }
 
 template <typename problem_t>
-template <quokka::direction dir>
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE void
 AMRSimulation<problem_t>::setCustomBoundaryConditionsFaceVar(const amrex::IntVect &iv, amrex::Array4<amrex::Real> const &dest, int dcomp, int numcomp,
 							     amrex::GeometryData const &geom, const amrex::Real time, const amrex::BCRec *bcr, int bcomp,
@@ -2277,9 +2058,9 @@ void AMRSimulation<problem_t>::FillPatch(int lev, amrex::Real time, amrex::Multi
 	}
 
 	if (cen == quokka::centering::cc) {
-		FillPatchWithData(lev, time, mf, cmf, ctime, fmf, ftime, icomp, ncomp, BCs_cc_, cen, dir, fptype, InterpHookNone, InterpHookNone);
+		FillPatchWithData(lev, time, mf, cmf, ctime, fmf, ftime, icomp, ncomp, BCs_cc_, cen, fptype, InterpHookNone, InterpHookNone);
 	} else if (cen == quokka::centering::fc) {
-		FillPatchWithData(lev, time, mf, cmf, ctime, fmf, ftime, icomp, ncomp, BCs_fc_, cen, dir, fptype, InterpHookNone, InterpHookNone);
+		FillPatchWithData(lev, time, mf, cmf, ctime, fmf, ftime, icomp, ncomp, BCs_fc_, cen, fptype, InterpHookNone, InterpHookNone);
 	}
 }
 
@@ -2320,7 +2101,11 @@ template <typename problem_t> void AMRSimulation<problem_t>::setInitialCondition
 		}
 		// check that the valid state_new_fc_[level][idim] data is filled properly
 		AMREX_ALWAYS_ASSERT(!state_new_fc_[level][idim].contains_nan(0, ncomp_per_dim_fc));
-		// fill ghost zones
+	}
+
+	// fill ghost zones for all face dimensions
+	// Option 1: Fill each dimension individually (maintains existing behavior)
+	for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 		// N.B. for face-centered fields, we must use FillPatchType::fillpatch_function
 		fillBoundaryConditions(state_new_fc_[level][idim], state_new_fc_[level][idim], level, time, quokka::centering::fc,
 				       static_cast<quokka::direction>(idim), InterpHookNone, InterpHookNone, FillPatchType::fillpatch_function);
@@ -2348,10 +2133,13 @@ void AMRSimulation<problem_t>::MakeNewLevelFromScratch(int level, amrex::Real ti
 	tNew_[level] = time;
 	tOld_[level] = time - 1.e200;
 
-	if (level > 0 && (do_reflux != 0)) {
-		flux_reg_[level] = std::make_unique<amrex::FluxRegister>(ba, dm, refRatio(level - 1), level, ncomp_cc);
+	if (level > 0 && (do_flux_register_init != 0)) {
+		flux_reg_[level] = std::make_unique<amrex::YAFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
+									   Geom(level - 1), refRatio(level - 1), level, ncomp_cc);
+
+		// Initialize EdgeFluxRegister for MHD
 		if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-			const int nemf_vars = 1;
+			const int nemf_vars = 1; // EMF has 1 component per dimension
 			emf_reg_[level] = std::make_unique<amrex::EdgeFluxRegister>(ba, boxArray(level - 1), dm, DistributionMap(level - 1), Geom(level),
 										    Geom(level - 1), nemf_vars);
 		}
@@ -2429,7 +2217,7 @@ void AMRSimulation<problem_t>::fillBoundaryConditions(amrex::MultiFab &S_filled,
 			amrex::ignore_unused(i);
 		}
 
-		FillPatchWithData(lev, time, S_filled, coarseData, coarseTime, fineData, fineTime, 0, S_filled.nComp(), BCs, cen, dir, fptype, pre_interp,
+		FillPatchWithData(lev, time, S_filled, coarseData, coarseTime, fineData, fineTime, 0, S_filled.nComp(), BCs, cen, fptype, pre_interp,
 				  post_interp);
 	} else { // level 0
 		// fill internal and periodic boundaries, ignoring corners (cross=true)
@@ -2447,9 +2235,9 @@ void AMRSimulation<problem_t>::fillBoundaryConditions(amrex::MultiFab &S_filled,
 				// fill physical boundaries
 				physicalBoundaryFunctor(state, 0, state.nComp(), state.nGrowVect(), time, 0);
 			} else if (cen == quokka::centering::fc) {
-				// create face-centered boundary functor using the passed direction
+				// create face-centered boundary functor
 				amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>> boundaryFunctor =
-				    amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>{setBoundaryFunctorFaceVar<problem_t>{dir}};
+				    amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>{setBoundaryFunctorFaceVar<problem_t>{}};
 				amrex::PhysBCFunct<amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>> physicalBoundaryFunctor(geom[lev], BCs,
 																	 boundaryFunctor);
 				// fill physical boundaries
@@ -2474,7 +2262,7 @@ template <typename PreInterpHook, typename PostInterpHook>
 void AMRSimulation<problem_t>::FillPatchWithData(int lev, amrex::Real time, amrex::MultiFab &mf, amrex::Vector<amrex::MultiFab *> &coarseData,
 						 amrex::Vector<amrex::Real> &coarseTime, amrex::Vector<amrex::MultiFab *> &fineData,
 						 amrex::Vector<amrex::Real> &fineTime, int icomp, int ncomp, amrex::Vector<amrex::BCRec> &BCs,
-						 quokka::centering &cen, quokka::direction dir, FillPatchType fptype, PreInterpHook const &pre_interp,
+						 quokka::centering &cen, FillPatchType fptype, PreInterpHook const &pre_interp,
 						 PostInterpHook const &post_interp)
 {
 	BL_PROFILE("AMRSimulation::FillPatchWithData()"); // NOLINT(misc-const-correctness)
@@ -2493,7 +2281,7 @@ void AMRSimulation<problem_t>::FillPatchWithData(int lev, amrex::Real time, amre
 	amrex::GpuBndryFuncFab<setBoundaryFunctor<problem_t>> boundaryFunctor_cc(setBoundaryFunctor<problem_t>{});
 	amrex::PhysBCFunct<amrex::GpuBndryFuncFab<setBoundaryFunctor<problem_t>>> finePhysicalBoundaryFunctor_cc(geom[lev], BCs, boundaryFunctor_cc);
 
-	amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>> boundaryFunctor_fc(setBoundaryFunctorFaceVar<problem_t>{dir});
+	amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>> boundaryFunctor_fc(setBoundaryFunctorFaceVar<problem_t>{});
 	amrex::PhysBCFunct<amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>> finePhysicalBoundaryFunctor_fc(geom[lev], BCs, boundaryFunctor_fc);
 
 	if (lev == 0) { // NOTE: used by RemakeLevel
@@ -2540,6 +2328,9 @@ void AMRSimulation<problem_t>::FillPatchWithData(int lev, amrex::Real time, amre
 	}
 }
 
+// Compute a new multifab array by filling ghost cells with space-time interpolated data
+// This array version allows using face_divfree_interp for face-centered data
+
 // Fill an entire multifab by interpolating from the coarser level
 // this comes into play when a new level of refinement appears
 template <typename problem_t>
@@ -2566,52 +2357,11 @@ void AMRSimulation<problem_t>::FillCoarsePatch(int lev, amrex::Real time, amrex:
 		amrex::InterpFromCoarseLevel(mf, time, *cmf[0], 0, icomp, ncomp, geom[lev - 1], geom[lev], coarsePhysicalBoundaryFunctor, 0,
 					     finePhysicalBoundaryFunctor, 0, refRatio(lev - 1), getAmrInterpolaterCellCentered(), BCs, 0);
 	} else if (cen == quokka::centering::fc) {
-		amrex::Interpolater *face_mapper = &amrex::face_divfree_interp;
 		amrex::InterpFromCoarseLevel(mf, time, *cmf[0], 0, icomp, ncomp, geom[lev - 1], geom[lev], coarsePhysicalBoundaryFunctor, 0,
-					     finePhysicalBoundaryFunctor, 0, refRatio(lev - 1), face_mapper, BCs, 0);
+					     finePhysicalBoundaryFunctor, 0, refRatio(lev - 1), getAmrInterpolaterFaceCentered(), BCs, 0);
 	} else {
 		amrex::Abort("AMR interpolation is not implemented for this zone centering!");
 	}
-}
-
-// Fill face-centred data for all directions simultaneously using divergence-free interpolation
-template <typename problem_t>
-void AMRSimulation<problem_t>::FillCoarsePatchFaceArray(int lev, amrex::Real time, amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &mf_array, int icomp,
-							int ncomp, amrex::Array<amrex::Vector<amrex::BCRec>, AMREX_SPACEDIM> &BCs_array)
-{
-	BL_PROFILE("AMRSimulation::FillCoarsePatchFaceArray()"); // NOLINT(misc-const-correctness)
-
-	AMREX_ASSERT(lev > 0);
-
-	amrex::Array<amrex::Vector<amrex::MultiFab *>, AMREX_SPACEDIM> cmf_array;
-	amrex::Vector<amrex::Real> ctime;
-	GetDataFaceArray(lev - 1, time, cmf_array, ctime);
-
-	if (ctime.size() != 1) {
-		amrex::Abort("FillCoarsePatchFaceArray: time interpolation not yet implemented for face arrays");
-	}
-
-	amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> cmf_ptrs;
-	for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-		if (cmf_array[idim].size() != 1) {
-			amrex::Abort("FillCoarsePatchFaceArray: unexpected number of face-centred MultiFabs");
-		}
-		cmf_ptrs[idim] = cmf_array[idim][0];
-	}
-
-	using BndryFunc = amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>;
-	amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> finePhysicalBoundaryFunctor;
-	amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> coarsePhysicalBoundaryFunctor;
-
-	for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-		const auto dir = static_cast<quokka::direction>(idim);
-		BndryFunc boundaryFunctor(setBoundaryFunctorFaceVar<problem_t>{dir});
-		finePhysicalBoundaryFunctor[idim] = amrex::PhysBCFunct<BndryFunc>(geom[lev], BCs_array[idim], boundaryFunctor);
-		coarsePhysicalBoundaryFunctor[idim] = amrex::PhysBCFunct<BndryFunc>(geom[lev - 1], BCs_array[idim], boundaryFunctor);
-	}
-
-	amrex::InterpFromCoarseLevel(mf_array, time, cmf_ptrs, 0, icomp, ncomp, geom[lev - 1], geom[lev], coarsePhysicalBoundaryFunctor, 0,
-				     finePhysicalBoundaryFunctor, 0, refRatio(lev - 1), &amrex::face_divfree_interp, BCs_array, 0);
 }
 
 // utility to copy in data from state_old_cc_[lev] and/or state_new_cc_[lev]
@@ -2659,7 +2409,7 @@ void AMRSimulation<problem_t>::GetData(int lev, amrex::Real time, amrex::Vector<
 	}
 }
 
-// Retrieve face-centred data for all spatial directions at the requested time
+// utility to get face-centered data for all dimensions together
 template <typename problem_t>
 void AMRSimulation<problem_t>::GetDataFaceArray(int lev, amrex::Real time, amrex::Array<amrex::Vector<amrex::MultiFab *>, AMREX_SPACEDIM> &data_array,
 						amrex::Vector<amrex::Real> &datatime)
@@ -2671,17 +2421,17 @@ void AMRSimulation<problem_t>::GetDataFaceArray(int lev, amrex::Real time, amrex
 	}
 	datatime.clear();
 
-	if (amrex::almostEqual(time, tNew_[lev], 5)) {
+	if (amrex::almostEqual(time, tNew_[lev], 5)) { // if time == tNew_[lev] within roundoff
 		datatime.push_back(tNew_[lev]);
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			data_array[idim].push_back(&state_new_fc_[lev][idim]);
 		}
-	} else if (amrex::almostEqual(time, tOld_[lev], 5)) {
+	} else if (amrex::almostEqual(time, tOld_[lev], 5)) { // if time == tOld_[lev] within roundoff
 		datatime.push_back(tOld_[lev]);
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 			data_array[idim].push_back(&state_old_fc_[lev][idim]);
 		}
-	} else {
+	} else { // otherwise return both old and new states for interpolation
 		datatime.push_back(tOld_[lev]);
 		datatime.push_back(tNew_[lev]);
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
@@ -2689,6 +2439,46 @@ void AMRSimulation<problem_t>::GetDataFaceArray(int lev, amrex::Real time, amrex
 			data_array[idim].push_back(&state_new_fc_[lev][idim]);
 		}
 	}
+}
+
+// Fill face-centered data using array-based interpolation for divergence-free constraint
+template <typename problem_t>
+void AMRSimulation<problem_t>::FillCoarsePatchFaceArray(int lev, amrex::Real time, amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &mf_array, int icomp,
+							int ncomp, amrex::Array<amrex::Vector<amrex::BCRec>, AMREX_SPACEDIM> &BCs_array)
+{
+	BL_PROFILE("AMRSimulation::FillCoarsePatchFaceArray()"); // NOLINT(misc-const-correctness)
+
+	AMREX_ASSERT(lev > 0);
+
+	amrex::Array<amrex::Vector<amrex::MultiFab *>, AMREX_SPACEDIM> cmf_array;
+	amrex::Vector<amrex::Real> ctime;
+	GetDataFaceArray(lev - 1, time, cmf_array, ctime);
+
+	if (ctime.size() != 1) {
+		amrex::Abort("FillCoarsePatchFaceArray: time interpolation not yet implemented for face arrays");
+	}
+
+	// Create coarse array for InterpFromCoarseLevel
+	amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> cmf_ptrs;
+	for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+		if (cmf_array[idim].size() != 1) {
+			amrex::Abort("FillCoarsePatchFaceArray: how did this happen?");
+		}
+		cmf_ptrs[idim] = cmf_array[idim][0];
+	}
+
+	using BndryFunc = amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>;
+	BndryFunc boundaryFunctor(setBoundaryFunctorFaceVar<problem_t>{});
+	amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> finePhysicalBoundaryFunctor;
+	amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> coarsePhysicalBoundaryFunctor;
+
+	for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+		finePhysicalBoundaryFunctor[idim] = amrex::PhysBCFunct<BndryFunc>(geom[lev], BCs_array[idim], boundaryFunctor);
+		coarsePhysicalBoundaryFunctor[idim] = amrex::PhysBCFunct<BndryFunc>(geom[lev - 1], BCs_array[idim], boundaryFunctor);
+	}
+
+	amrex::InterpFromCoarseLevel(mf_array, time, cmf_ptrs, 0, icomp, ncomp, geom[lev - 1], geom[lev], coarsePhysicalBoundaryFunctor, 0,
+				     finePhysicalBoundaryFunctor, 0, refRatio(lev - 1), &amrex::face_divfree_interp, BCs_array, 0);
 }
 
 // average down on all levels
@@ -2712,9 +2502,9 @@ template <typename problem_t> void AMRSimulation<problem_t>::AverageDownTo(int c
 
 	// face-centred
 	if constexpr (Physics_Indices<problem_t>::nvarTotal_fc > 0) {
-		// for each face-centering (number of dimensions)
+		// NOTE: must call the version of average_down_faces that takes periodicity into account
 		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-			amrex::average_down_faces(state_new_fc_[crse_lev + 1][idim], state_new_fc_[crse_lev][idim], refRatio(crse_lev), geom[crse_lev]);
+			amrex::average_down_faces(state_new_fc_[crse_lev + 1][idim], state_new_fc_[crse_lev][idim], refRatio(crse_lev), Geom(crse_lev));
 		}
 	}
 }
@@ -2822,7 +2612,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::InitPhyParticles()
 		StochasticStellarPopParticles->SetVerbose(0);
 
 		// Register with particle register - StochasticStellarPop particles allow creation
-		particleRegister_.registerParticleType(StochasticStellarPopParticles.get(), quokka::ParticleType::StochasticStellarPop);
+		particleRegister_.registerStarParticleType(StochasticStellarPopParticles.get(), quokka::ParticleType::StochasticStellarPop);
 
 		// Initialize particles through user-defined function
 		createInitialStochasticStellarPopParticles();
@@ -2836,7 +2626,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::InitPhyParticles()
 		SinkParticles->SetVerbose(0);
 
 		// Register with particle register - Sink particles allow creation
-		particleRegister_.registerParticleType(SinkParticles.get(), quokka::ParticleType::Sink);
+		particleRegister_.registerStarParticleType(SinkParticles.get(), quokka::ParticleType::Sink);
 
 		// Initialize particles through user-defined function
 		createInitialSinkParticles();
@@ -2849,7 +2639,7 @@ template <typename problem_t> void AMRSimulation<problem_t>::InitPhyParticles()
 		TestParticles->SetVerbose(0);
 
 		// Register with particle register - Test particles have all features enabled
-		particleRegister_.registerParticleType(TestParticles.get(), quokka::ParticleType::Test);
+		particleRegister_.registerStarParticleType(TestParticles.get(), quokka::ParticleType::Test);
 
 		// Initialize particles through user-defined function
 		createInitialTestParticles();
@@ -3045,17 +2835,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::createDiagnostics()
 			amrex::Abort("[Diagnostics] Field " + v + " is not available!");
 		}
 	}
-
-	// Check if any diagnostic is a PlotFile type and disable regular plotfile output
-	for (const auto &diag : m_diagnostics) {
-		if (dynamic_cast<DiagPlotfile *>(diag.get()) != nullptr) {
-			if (plotfileInterval_ > 0) {
-				amrex::Print() << "DiagPlotfile detected: disabling regular plotfile output (plotfileInterval_ set to -1)\n";
-				plotfileInterval_ = -1;
-			}
-			break;
-		}
-	}
 }
 
 template <typename problem_t> void AMRSimulation<problem_t>::updateDiagnostics()
@@ -3078,7 +2857,6 @@ template <typename problem_t> void AMRSimulation<problem_t>::doDiagnostics()
 	    std::any_of(m_diagnostics.cbegin(), m_diagnostics.cend(), [this](const auto &diag) { return diag->doDiag(tNew_[0], istep[0]); });
 
 	amrex::Vector<std::unique_ptr<amrex::MultiFab>> diagMFVec(finestLevel() + 1);
-	amrex::Vector<const amrex::MultiFab *> diagMFVec_ptr;
 	if (computeVars) {
 		for (int lev{0}; lev <= finestLevel(); ++lev) {
 			diagMFVec[lev] = std::make_unique<amrex::MultiFab>(grids[lev], dmap[lev], m_diagVars.size(), 1);
@@ -3097,46 +2875,11 @@ template <typename problem_t> void AMRSimulation<problem_t>::doDiagnostics()
 				amrex::MultiFab::Copy(*diagMFVec[lev], mf, mf_idx, v, 1, 1);
 			}
 		}
-		diagMFVec_ptr = GetVecOfConstPtrs(diagMFVec);
 	}
-
-	// Prepare common diagnostic data
-	auto const geoms = Geom(0, finestLevel());
-	auto const ref_ratio = refRatio();
 
 	for (const auto &diag : m_diagnostics) {
 		if (diag->doDiag(tNew_[0], istep[0])) {
-			// Set common diagnostic data (including simulation pointer)
-			diag->setDiagData(this, &diagMFVec_ptr, &m_diagVars, &geoms, &ref_ratio, &simulationMetadata_);
-
-			// Call the appropriate template processDiag for each diagnostic type
-			// All diagnostics now have a unified API: processDiag<problem_t>(nstep, time)
-			auto *plotfileDiag = dynamic_cast<DiagPlotfile *>(diag.get());
-			if (plotfileDiag != nullptr) {
-				plotfileDiag->processDiag<problem_t>(istep[0], tNew_[0]);
-				continue;
-			}
-
-			auto *projectionDiag = dynamic_cast<DiagProjectionPlot *>(diag.get());
-			if (projectionDiag != nullptr) {
-				projectionDiag->processDiag<problem_t>(istep[0], tNew_[0]);
-				continue;
-			}
-
-			auto *framePlaneDiag = dynamic_cast<DiagFramePlane *>(diag.get());
-			if (framePlaneDiag != nullptr) {
-				framePlaneDiag->processDiag<problem_t>(istep[0], tNew_[0]);
-				continue;
-			}
-
-			auto *pdfDiag = dynamic_cast<DiagPDF *>(diag.get());
-			if (pdfDiag != nullptr) {
-				pdfDiag->processDiag<problem_t>(istep[0], tNew_[0]);
-				continue;
-			}
-
-			// Unknown diagnostic type
-			amrex::Abort("Unknown diagnostic type - all diagnostic types must implement template processDiag");
+			diag->processDiag(istep[0], tNew_[0], GetVecOfConstPtrs(diagMFVec), m_diagVars, simulationMetadata_);
 		}
 	}
 }
@@ -3364,6 +3107,38 @@ template <typename problem_t> void AMRSimulation<problem_t>::ReadMetadataFile(st
 	}
 
 	fesetenv(&orig_feenv); // restore FPE
+}
+
+template <typename problem_t> void AMRSimulation<problem_t>::WriteProjectionPlotfile() const
+{
+	std::vector<std::string> dirs{};
+	const amrex::ParmParse pp;
+	pp.queryarr("projection.dirs", dirs);
+
+	auto dir_from_string = [=](const std::string &dir_str) {
+		if (dir_str == "x") {
+			return amrex::Direction::x;
+		}
+#if AMREX_SPACEDIM >= 2
+		if (dir_str == "y") {
+			return amrex::Direction::y;
+		}
+#endif
+#if AMREX_SPACEDIM == 3
+		if (dir_str == "z") {
+			return amrex::Direction::z;
+		}
+#endif
+		amrex::Error("invalid direction for projection!");
+		return amrex::Direction::x;
+	};
+
+	for (auto &dir_str : dirs) {
+		// compute projections along axis 'dir'
+		amrex::Direction dir = dir_from_string(dir_str);
+		std::unordered_map<std::string, amrex::BaseFab<amrex::Real>> proj = ComputeProjections(dir);
+		quokka::diagnostics::WriteProjection(dir, proj, tNew_[0], istep[0]);
+	}
 }
 
 template <typename problem_t> void AMRSimulation<problem_t>::WriteStatisticsFile()
@@ -3666,7 +3441,7 @@ void AMRSimulation<problem_t>::interpolateMultiFabFromRestart(amrex::MultiFab &t
 template <typename problem_t>
 void AMRSimulation<problem_t>::interpolateFaceCenteredMultiFabFromRestart(amrex::MultiFab &target, const amrex::MultiFab &source,
 									  const RefinementContext &context, const amrex::Geometry &coarse_geom,
-									  const amrex::Geometry &fine_geom, quokka::direction dir)
+									  const amrex::Geometry &fine_geom)
 {
 	if (!context.needs_refinement()) {
 		// if not refining, ParallelCopy
@@ -3675,12 +3450,43 @@ void AMRSimulation<problem_t>::interpolateFaceCenteredMultiFabFromRestart(amrex:
 		// if refining, InterpFromCoarseLevel
 		amrex::IntVect restart_ref_ratio{AMREX_D_DECL(context.refinement_factor, context.refinement_factor, context.refinement_factor)};
 		using BndryFunc = amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>;
-		BndryFunc boundaryFunctor(setBoundaryFunctorFaceVar<problem_t>{dir});
+		BndryFunc boundaryFunctor(setBoundaryFunctorFaceVar<problem_t>{});
 		amrex::PhysBCFunct<BndryFunc> fineBdryFunct(fine_geom, BCs_fc_, boundaryFunctor);
 		amrex::PhysBCFunct<BndryFunc> coarseBdryFunct(coarse_geom, BCs_fc_, boundaryFunctor);
-		amrex::Interpolater *face_mapper = &amrex::face_divfree_interp;
 		amrex::InterpFromCoarseLevel(target, 0., source, 0, 0, source.nComp(), coarse_geom, fine_geom, coarseBdryFunct, 0, fineBdryFunct, 0,
-					     restart_ref_ratio, face_mapper, BCs_fc_, 0);
+					     restart_ref_ratio, &amrex::face_linear_interp, BCs_fc_, 0);
+	}
+}
+
+template <typename problem_t>
+void AMRSimulation<problem_t>::interpolateFaceCenteredArrayFromRestart(amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &target_array,
+								       const amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> &source_array,
+								       const RefinementContext &context, const amrex::Geometry &coarse_geom,
+								       const amrex::Geometry &fine_geom)
+{
+	if (!context.needs_refinement()) {
+		// if not refining, ParallelCopy for each dimension
+		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+			target_array[idim]->ParallelCopy(*source_array[idim], 0, 0, Physics_Indices<problem_t>::nvarPerDim_fc, nghost_fc_, nghost_fc_);
+		}
+	} else {
+		// if refining, use array-based InterpFromCoarseLevel with divergence-free interpolation
+		amrex::IntVect restart_ref_ratio{AMREX_D_DECL(context.refinement_factor, context.refinement_factor, context.refinement_factor)};
+		using BndryFunc = amrex::GpuBndryFuncFab<setBoundaryFunctorFaceVar<problem_t>>;
+		BndryFunc boundaryFunctor(setBoundaryFunctorFaceVar<problem_t>{});
+
+		amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> fineBdryFunct;
+		amrex::Array<amrex::PhysBCFunct<BndryFunc>, AMREX_SPACEDIM> coarseBdryFunct;
+		amrex::Array<amrex::Vector<amrex::BCRec>, AMREX_SPACEDIM> BCs_array;
+
+		for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+			fineBdryFunct[idim] = amrex::PhysBCFunct<BndryFunc>(fine_geom, BCs_fc_, boundaryFunctor);
+			coarseBdryFunct[idim] = amrex::PhysBCFunct<BndryFunc>(coarse_geom, BCs_fc_, boundaryFunctor);
+			BCs_array[idim] = BCs_fc_;
+		}
+
+		amrex::InterpFromCoarseLevel(target_array, 0., source_array, 0, 0, source_array[0]->nComp(), coarse_geom, fine_geom, coarseBdryFunct, 0,
+					     fineBdryFunct, 0, restart_ref_ratio, &amrex::face_divfree_interp, BCs_array, 0);
 	}
 }
 
@@ -3702,18 +3508,23 @@ template <typename problem_t> void AMRSimulation<problem_t>::loadMultiFabData(co
 
 		// face-centred data
 		if constexpr (Physics_Indices<problem_t>::nvarTotal_fc > 0) {
+			// Read all face-centered MultiFabs for all dimensions
+			amrex::Array<amrex::MultiFab, AMREX_SPACEDIM> tmp_fc_array;
+			amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> tmp_fc_ptrs;
+			amrex::Array<amrex::MultiFab *, AMREX_SPACEDIM> target_fc_ptrs;
+
 			for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-				amrex::MultiFab tmp_fc;
-				amrex::VisMF::Read(
-				    tmp_fc, amrex::MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", std::string("Face_") + quokka::face_dir_str[idim]));
-#if AMREX_SPACEDIM == 1
-				constexpr std::array<quokka::direction, 1> directions = {quokka::direction::x};
-#elif AMREX_SPACEDIM == 2
-				constexpr std::array<quokka::direction, 2> directions = {quokka::direction::x, quokka::direction::y};
-#elif AMREX_SPACEDIM == 3
-				constexpr std::array<quokka::direction, 3> directions = {quokka::direction::x, quokka::direction::y, quokka::direction::z};
-#endif
-				interpolateFaceCenteredMultiFabFromRestart(state_new_fc_[lev][idim], tmp_fc, context, coarse_geom, geom[lev], directions[idim]);
+				amrex::VisMF::Read(tmp_fc_array[idim], amrex::MultiFabFileFullPrefix(lev, restart_chkfile, "Level_",
+												     std::string("Face_") + quokka::face_dir_str[idim]));
+				tmp_fc_ptrs[idim] = &tmp_fc_array[idim];
+				target_fc_ptrs[idim] = &state_new_fc_[lev][idim];
+			}
+
+			// Use array-based interpolation for divergence-free constraint
+			interpolateFaceCenteredArrayFromRestart(target_fc_ptrs, tmp_fc_ptrs, context, coarse_geom, geom[lev]);
+
+			// Check that all dimensions are properly filled
+			for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
 				AMREX_ALWAYS_ASSERT(!state_new_fc_[lev][idim].contains_nan(0, state_new_fc_[lev][idim].nComp())); // check valid faces
 			}
 		}
@@ -3785,13 +3596,10 @@ template <typename problem_t> void AMRSimulation<problem_t>::ReadCheckpointFile(
 		state_new_cc_[lev].define(grids[lev], dmap[lev], ncomp_cc, nghost_cc);
 		max_signal_speed_[lev].define(ba, dm, 1, nghost_cc);
 
-		if (lev > 0 && (do_reflux != 0)) {
-			flux_reg_[lev] = std::make_unique<amrex::FluxRegister>(ba, dm, refRatio(lev - 1), lev, ncomp_cc);
-			if constexpr (Physics_Traits<problem_t>::is_mhd_enabled) {
-				const int nemf_vars = 1;
-				emf_reg_[lev] = std::make_unique<amrex::EdgeFluxRegister>(ba, boxArray(lev - 1), dm, DistributionMap(lev - 1), Geom(lev),
-											  Geom(lev - 1), nemf_vars);
-			}
+		if (lev > 0 && (do_flux_register_init != 0)) {
+			flux_reg_[lev] = std::make_unique<amrex::YAFluxRegister>(ba, boxArray(lev - 1), dm, DistributionMap(lev - 1), Geom(lev), Geom(lev - 1),
+										 refRatio(lev - 1), lev, ncomp_cc);
+			// FIXME(bwibking): initialize emf_reg_[lev] here
 		}
 
 		const int ncomp_per_dim_fc = Physics_Indices<problem_t>::nvarPerDim_fc;
@@ -3834,15 +3642,15 @@ template <typename problem_t> void AMRSimulation<problem_t>::ReadCheckpointFile(
 	}
 
 	if constexpr (Particle_Traits<problem_t>::particle_switch & ParticleSwitch::StochasticStellarPop) {
-		initializeParticleContainerFromCheckpoint(StochasticStellarPopParticles, quokka::ParticleType::StochasticStellarPop, header_box_arrays);
+		initializeParticleContainerFromCheckpoint(StochasticStellarPopParticles, quokka::ParticleType::StochasticStellarPop, header_box_arrays, true);
 	}
 
 	if constexpr (Particle_Traits<problem_t>::particle_switch & ParticleSwitch::Sink) {
-		initializeParticleContainerFromCheckpoint(SinkParticles, quokka::ParticleType::Sink, header_box_arrays);
+		initializeParticleContainerFromCheckpoint(SinkParticles, quokka::ParticleType::Sink, header_box_arrays, true);
 	}
 
 	if constexpr (Particle_Traits<problem_t>::particle_switch & ParticleSwitch::Test) {
-		initializeParticleContainerFromCheckpoint(TestParticles, quokka::ParticleType::Test, header_box_arrays);
+		initializeParticleContainerFromCheckpoint(TestParticles, quokka::ParticleType::Test, header_box_arrays, true);
 	}
 #endif // AMREX_SPACEDIM == 3
 
@@ -3947,13 +3755,21 @@ void AMRSimulation<problem_t>::restartParticleContainerWithRefinement(std::uniqu
 template <typename problem_t>
 template <typename ContainerType>
 void AMRSimulation<problem_t>::initializeParticleContainerFromCheckpoint(std::unique_ptr<ContainerType> &container, quokka::ParticleType particle_type,
-									 amrex::Vector<amrex::BoxArray> const &header_box_arrays)
+									 amrex::Vector<amrex::BoxArray> const &header_box_arrays, bool use_star_registration)
 {
 	AMREX_ASSERT(container == nullptr);
 	container = std::make_unique<ContainerType>(this);
 
 	// Register container
-	particleRegister_.registerParticleType(container.get(), particle_type);
+	if (use_star_registration) {
+#if AMREX_SPACEDIM == 3
+		particleRegister_.registerStarParticleType(container.get(), particle_type);
+#else
+		amrex::Abort("Star particles are only available in 3D builds");
+#endif
+	} else {
+		particleRegister_.registerParticleType(container.get(), particle_type);
+	}
 
 	// Read particles
 	restartParticleContainerWithRefinement(container, restart_chkfile, particleRegister_.getParticleTypeName(particle_type), header_box_arrays);
