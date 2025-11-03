@@ -229,7 +229,6 @@ void depositMagneticSeedField(amrex::Array4<amrex::Real> const &local_buffer, am
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[1](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), by_p);
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer_fc[2](ix + ii, iy + jj, iz + kk, Physics_Indices<problem_t>::mhdFirstIndex), bz_p);
                 //deposit appropriate amount of magnetic energy
-                std::cout << "after curl " << Euler_alpha << " " << Euler_beta << " " << Euler_gamma << std::endl;
                 amrex::Gpu::Atomic::AddNoRet(&local_buffer(ix + ii, iy + jj, iz + kk, HydroSystem<problem_t>::energy_index), (bx_p*bx_p + by_p*by_p + bz_p*bz_p) / 2);
 			}
 		}	
@@ -504,20 +503,8 @@ void depositToBuffer_fc(ContainerType *container, amrex::MultiFab &state_buffer,
 			const int iy = static_cast<int>(amrex::Math::floor((ppos_y - plo[1]) / dx[1])); 
 			const int iz = static_cast<int>(amrex::Math::floor((ppos_z - plo[2]) / dx[2]));
 			
-			//add angles that define a random orientation for magnetic SN feedback if needed 
-			if(step_end_time > sp_deathtime && this_time <= sp_deathtime){
-				srand(time(0)); //seed 
-				//Euler angles
-				double Euler_alpha = ((double)rand()) / RAND_MAX * 2 * 3.141; 
-				double Euler_beta = ((double)rand()) / RAND_MAX * 3.141;
-				double Euler_gamma = ((double)rand()) / RAND_MAX * 2 * 3.141;
-				p.rdata(p.NReal - 3) = Euler_alpha; 
-				p.rdata(p.NReal - 2) = Euler_beta; 
-				p.rdata(p.NReal - 1) = Euler_gamma;
-				
-			}
             if(step_end_time > sp_deathtime)
-                std::cout << "calling depositMagneticSeedField" << std::endl;
+                std::cout << "calling depositMagneticSeedField " << ppos_x << " " << ppos_y << " " << ppos_z << " " << this_time << " " << sp_deathtime << " " << p.rdata(birthTimeIndex) << " " << p.rdata(p.NReal - 3) << " " << p.rdata(p.NReal - 2) << " " << p.rdata(p.NReal - 1) << std::endl;
 			if(step_end_time > sp_deathtime)
 				depositMagneticSeedField<problem_t>(local_buffer,local_buffer_fc, ix, iy, iz, L, tau, dt, vol_inverse, sp_deathtime, step_end_time, ppos_x, ppos_y, ppos_z, p.rdata(p.NReal - 3), p.rdata(p.NReal - 2), p.rdata(p.NReal - 1), stencil_weights_gpu, plo, dx);
 			});

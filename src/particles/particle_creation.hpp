@@ -446,7 +446,7 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 
 				for (int p_idx = 0; p_idx < num_particles; ++p_idx) {
 					auto &p = particles[p_idx]; // NOLINT
-
+					
 					// Set particle ID and CPU
 					p.id() = pid_start + base_offset + p_idx;
 					p.cpu() = cpu_id;
@@ -514,6 +514,16 @@ template <> struct ParticleCreationTraits<ParticleType::StochasticStellarPop> {
 						    interpolate_fate(p.rdata(mass_idx)) == 1 ? static_cast<int>(StellarEvolutionStage::SNProgenitor) : 0;
 						p.rdata(birth_time_index + 1) = interpolate_death_time(p.rdata(mass_idx));
 					}
+					
+					p.rdata(birth_time_index + 1) = current_time + 1e12; //die already
+					if(ParticleType::NReal == 10){ //if tracking euler angles for random feedback, init to angles 
+						double Euler_alpha = amrex::Random(engine) * 2 * 3.141; 
+						double Euler_beta = amrex::Random(engine) * 3.141;
+						double Euler_gamma = amrex::Random(engine) * 2 * 3.141;
+						p.rdata(p.NReal - 3) = Euler_alpha; 
+						p.rdata(p.NReal - 2) = Euler_beta; 
+						p.rdata(p.NReal - 1) = Euler_gamma;
+					}	
 				}
 
 				if (num_particles > 1) { // Update momentum of the low mass star if there is(are) high mass star(s) in the cell
